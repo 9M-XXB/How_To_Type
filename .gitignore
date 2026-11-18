@@ -1,0 +1,6 @@
+# pyin 本地运行产物（按工作区惯例不入库）
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+pyin.log
