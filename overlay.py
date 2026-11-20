@@ -391,6 +391,14 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
             set_status("只有注释/空行——没有可运行的代码，未发送", "gray")
             return "break"
         state["busy"] = True
+        # 清空队列里陈旧的 show/move/hide：跟踪线程 0.5s 前排队的"重新显示"若在
+        # 注入开始后才被处理，覆盖框会弹回原位，把合成点击与 Cmd+V 挡下吞进自己
+        # （实测偶发"过早回来→粘贴进代码栏"即此竞态）
+        try:
+            while True:
+                q.get_nowait()
+        except queue.Empty:
+            pass
         rect = state["rect"]
         set_status("运行中…", "gray")
         log(f"Shift+Enter 触发（原位覆盖）：{len(code.splitlines())} 行"
@@ -424,6 +432,8 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
                 kind, payload = q.get_nowait()
                 if kind == "hide":
                     _show(False)
+                elif kind in ("show", "move") and state["busy"]:
+                    continue                     # busy 期间的 show/move 一律是陈旧消息，丢弃
                 elif kind == "show":
                     _show(True)
                 elif kind == "move":
@@ -451,8 +461,10 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
         root.after(int(POLL_INTERVAL * 1000), _poll)
 
     def _show(v):
+        if v and state["busy"]:                  # 双保险：busy 期间不允许重新显示
+            return
         # 隐藏用"移出屏幕"而非 withdraw：floating 面板的 withdraw 在部分实现中不可靠
-        # （面板残留原位 → 注入的合成点击/粘贴落回覆盖框自己）。移出屏幕后不在光标
+        # （面板残留原位 → 注入的合成点击/Cmd+V 被面板自己吞掉）。移出屏幕后不在光标
         # 路径上，必然不会拦截点击；重新显示时按 rect 几何贴回。
         if v:
             r = state["rect"]
