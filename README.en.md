@@ -105,5 +105,20 @@ Tunable constants (top of pyin.py): `RUN_TIMEOUT=5.0`, `FOCUS_DELAY=0.5` / `PAST
 
 - **Design**: feasibility study (author's workspace doc "调研笔记", not shipped in this repo) §1.1 Tier A (floating editor + explicit trigger + clipboard injection + Enter-to-send) and §4 MVP plan (this prototype = the macOS implementation of W1+W2); injection precedent Espanso (espanso.org).
 - **Apple APIs** (non-workspace sources, official docs): CGEventTap / CGEventPost and keycodes (kVK_ANSI_V=9, kVK_Return=36, kVK_ANSI_E=14); `AXIsProcessTrusted` called via ctypes against the ApplicationServices framework.
+
+## Cross-platform (Windows / Linux)
+
+Platform-specific implementations live in `native.py` (window enumeration / frontmost detection / activation / click / paste chord / Enter / clipboard / hotkey); pyin and overlay dispatch through it:
+
+| Platform | Injection & clipboard | Positioning | Global hotkey | Permission |
+|---|---|---|---|---|
+| **macOS** | CGEventPost + private HID source (swizzled canBecomeKey) + pbcopy/pbpaste | T1 AX focused element + T2 point-offset model | CGEventTap ⌘⌥E | Accessibility |
+| **Windows** | SendInput (Ctrl+V / Return) + CF_UNICODETEXT clipboard (pure ctypes, zero third-party deps) | EnumWindows (title 微信/WeChat or class WeChatMainWndForPC/Weixin) + T2 calibration | RegisterHotKey Ctrl+Alt+E | none needed |
+| **Linux** | xdotool (key ctrl+v / Return, mousemove/click) + xclip clipboard | xdotool search (class wechat/weixin) + T2 calibration | not yet | none needed (X11/XWayland) |
+
+- Input-area calibration is saved per platform (overlay_calib.json is sectioned by platform).
+- `cmd_enter` equals `ctrl_enter` on Windows (no ⌘ key there).
+- Linux needs an X11/XWayland session plus `xdotool` and `xclip` (startup logs tell you the install command); native Wayland sessions are not supported yet.
+- **Honest note**: the Windows/Linux branches are written against the official APIs and have **not been tested on those platforms yet**; when something misbehaves there, please report with pyin.log.
 - **WeChat behavior assumptions** (no workspace verification, unverified across versions): "Enter sends the message" on by default, paste lands in the input box, activation restores input focus.
 - **Scope & keybindings** (specified by the author, 2026-11-17): Python language, WeChat as target, Enter=newline / Shift+Enter=run-and-send, platform macOS, **results sent as-is with no header**.

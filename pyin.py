@@ -32,6 +32,7 @@ pyin —— 「更有趣（存疑）的输入方式」桌面原型（macOS · �
 """
 
 import argparse
+import native
 import os
 import queue
 import signal
@@ -142,11 +143,15 @@ def has_effective_code(code):
 # =============================================================================
 
 def set_clipboard(text):
+    if native.PLATFORM != "darwin":
+        return native.clipboard_set(text)
     p = subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=False)
     return p.returncode == 0
 
 
 def get_clipboard():
+    if native.PLATFORM != "darwin":
+        return native.clipboard_get()
     return subprocess.run(["pbpaste"], capture_output=True).stdout.decode("utf-8", "replace")
 
 
@@ -239,38 +244,43 @@ class Injector:
             raise RuntimeError(f"osascript 注入失败：{err}（多为辅助功能未授权）")
 
     def paste(self):
-        if HAVE_QUARTZ:
-            self._key(9, Quartz.kCGEventFlagMaskCommand)   # kVK_ANSI_V
-        else:
-            self._osa('tell application "System Events" to keystroke "v" using command down')
+        if native.PLATFORM != "darwin":
+            native.paste_chord()
+            return
+        self._key(9, Quartz.kCGEventFlagMaskCommand)   # kVK_ANSI_V
 
     def enter(self):
+        if native.PLATFORM != "darwin":
+            native.enter_send(self.send_key)
+            return
         keycode, flags, osa_mods = send_key_spec(self.send_key)
-        if HAVE_QUARTZ and self.send_engine == "cgevent":
-            self._key(keycode, flags)
-        else:
-            # osascript 引擎：另一条合成路径（部分应用对 CGEvent 合成 Return 不响应时试它）
-            self._osa(f'tell application "System Events" to key code {keycode}{osa_mods}')
+        self._key(keycode, flags)
 
     def click_at(self, px, py):
         """在全局屏幕坐标 (px, py)（点）合成左键单击——保证目标输入框成为第一响应者。
         事件源与按键注入一致（私有 HID 源）。原位覆盖模式（档位 B）注入链使用。"""
-        if HAVE_QUARTZ:
-            move = Quartz.CGEventCreateMouseEvent(self._src, Quartz.kCGEventMouseMoved,
-                                                  (px, py), Quartz.kCGMouseButtonLeft)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
-            time.sleep(0.05)
-            for etype in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
-                ev = Quartz.CGEventCreateMouseEvent(self._src, etype, (px, py),
-                                                    Quartz.kCGMouseButtonLeft)
-                Quartz.CGEventSetFlags(ev, 0)
-                Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
-                time.sleep(0.03)
-        else:
-            self._osa(f'tell application "System Events" to click at {{{int(px)}, {int(py)}}}')
+        if native.PLATFORM != "darwin":
+            native.click_at(px, py)
+            return
+        if not HAVE_QUARTZ:
+            self._osa('tell application "System Events" to click at '
+                      f'{{{int(px)}, {int(py)}}}')
+            return
+        move = Quartz.CGEventCreateMouseEvent(self._src, Quartz.kCGEventMouseMoved,
+                                              (px, py), Quartz.kCGMouseButtonLeft)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
+        time.sleep(0.05)
+        for etype in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
+            ev = Quartz.CGEventCreateMouseEvent(self._src, etype, (px, py),
+                                                Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventSetFlags(ev, 0)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+            time.sleep(0.03)
 
     # -- 激活与核实 -------------------------------------------------------------
     def activate_wechat(self):
+        if native.PLATFORM != "darwin":
+            return native.activate_wechat()
         p = subprocess.run(["osascript", "-e", ACTIVATE_SCRIPT],
                            capture_output=True, text=True, timeout=5)
         if p.returncode != 0:
@@ -347,6 +357,11 @@ class Injector:
 
 def start_hotkey(on_hotkey, on_log, desc=None):
     """⌘⌥E 全局热键（ListenOnly tap，不吞键）。回调只做 queue.put（线程安全）。"""
+    import native
+    if native.PLATFORM == "windows":
+        return native.hotkey_start(on_hotkey, on_log)
+    if native.PLATFORM == "linux":
+        return native.hotkey_start(on_hotkey, on_log)
     if not HAVE_QUARTZ:
         on_log("未安装 pyobjc Quartz：全局热键不可用（用 Dock/点击窗口代替）")
         return False
@@ -389,6 +404,9 @@ def start_hotkey(on_hotkey, on_log, desc=None):
 def accessibility_trusted():
     """尽力探测辅助功能授权状态（AXIsProcessTrusted）。True/False；None = 无法判定。
     ctypes 直调 ApplicationServices 框架——不依赖 pyobjc（非工作区来源：Apple 官方 API）。"""
+    import native
+    if native.PLATFORM != "darwin":
+        return native.accessibility_trusted()
     try:
         import ctypes
         fs = ctypes.CDLL("/System/Library/Frameworks/"
@@ -735,6 +753,8 @@ def main():
     ap.add_argument("--overlay-tune", action="store_true",
                     help="输入区交互校准：方向键/Shift+方向键微调橙色外框至与微信输入框"
                          "完全重合，回车保存 overlay_calib.json（Esc 放弃）")
+    ap.add_argument("--log-keys", action="store_true",
+                    help="诊断日志记录每一次按键（默认只记录非可打印键，避免打字刷屏）")
     ap.add_argument("--overlay-probe", action="store_true",
                     help="只读探测：打印微信窗口边界与输入区定位结果，不启动界面")
     args = ap.parse_args()
@@ -756,7 +776,7 @@ def main():
         return
     # 默认模式：原位覆盖（档位 B）
     overlay.run(dry_run=args.dry_run, send_key=args.send_key,
-                send_engine=args.send_engine)
+                send_engine=args.send_engine, log_keys=args.log_keys)
     return
 
 

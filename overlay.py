@@ -34,6 +34,7 @@ import threading
 import time
 import traceback
 
+import native
 import pyin
 from pyin import (FOCUS_DELAY, PASTE_DELAY, WECHAT_NAMES, HAVE_QUARTZ,
                   log, run_code, format_result, has_effective_code,
@@ -299,14 +300,18 @@ def heuristic_rect(win, calib):
 
 def locate(max_win, calib):
     """返回 (rect, how)。rect 为全局屏幕点 (x, y, w, h)；定位失败 → (None, 原因)。"""
+    import native
     win_pids = {pid for pid, _ in max_win}
     win_h = max((b[3] for _, b in max_win), default=0)
     last_ax = "微信窗口不可见"
     for pid in win_pids:
-        rect, how = ax_input_rect(pid, win_h)
-        last_ax = how
-        if rect:
-            return rect, how
+        if native.PLATFORM == "darwin":
+            rect, how = ax_input_rect(pid, win_h)
+            last_ax = how
+            if rect:
+                return rect, how
+        else:
+            last_ax = "T1（AX）仅 macOS；Windows/Linux 使用 T2 + 校准"
     win = max(max_win, key=lambda t: t[1][2] * t[1][3])[1]
     if win[2] < MIN_RECT or win[3] < MIN_RECT:
         return None, last_ax
@@ -323,7 +328,8 @@ def locate_safe(max_win, calib):
 
 
 # ---- 覆盖框 GUI ------------------------------------------------------------------
-def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
+def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False,
+        log_keys=False):
     import tkinter as tk
 
     injector = Injector(dry_run, send_key=send_key, send_engine=send_engine)
@@ -341,12 +347,16 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
 
     TITLE_H = 0                   # 浮动面板无边框：窗口框与内容重合，无需标题栏补偿
     root = tk.Tk()
-    root.withdraw()               # 先隐藏：窗口类必须在映射前设置
-    # 浮动面板（NSPanel）：无边框、点击可成为 key window 接收键盘——overrideredirect
-    # 无边框窗口无法成为 key window（用户实测：Button-1 有事件但无 FocusIn，键盘收不到；
-    # canBecomeKey 补丁亦无效，因该类窗口根本不参与 key 竞选）。浮动类是 Tk 官方留给
-    # aqua 的窗口类设置口 ::tk::unsupported::MacWindowStyle（须在映射前调用）。
-    root.tk.call("::tk::unsupported::MacWindowStyle", "style", root, "floating", "none")
+    if native.PLATFORM == "darwin":
+        root.withdraw()               # 先隐藏：窗口类必须在映射前设置
+        # 浮动面板（NSPanel）：无边框、点击可成为 key window 接收键盘——overrideredirect
+        # 无边框窗口无法成为 key window（用户实测：Button-1 有事件但无 FocusIn，键盘收不到；
+        # canBecomeKey 补丁亦无效，因该类窗口根本不参与 key 竞选）。浮动类是 Tk 官方留给
+        # aqua 的窗口类设置口 ::tk::unsupported::MacWindowStyle（须在映射前调用）。
+        root.tk.call("::tk::unsupported::MacWindowStyle", "style", root, "floating", "none")
+    else:
+        # Windows/Linux：无边框窗口原生可聚焦，无需特殊处理
+        root.overrideredirect(True)
     root.attributes("-topmost", True)
     root.configure(bg="#1e1e1e")
     root.geometry("600x120+206+596")             # 初始占位，首轮定位后覆盖
@@ -381,7 +391,8 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
 
     q = queue.Queue()
     state = {"rect": None, "how": "", "busy": False, "paused": False,
-             "visible": False, "mapped": False, "wechat_seen": False}
+             "visible": False, "mapped": False, "keyable": False,
+             "wechat_seen": False}
 
     def on_run(_ev=None):
         if state["busy"]:
@@ -477,6 +488,14 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
             root.attributes("-topmost", True)
             root.lift()
             state["visible"] = True
+            if native.PLATFORM == "darwin" and not state.get("keyable"):
+                try:
+                    root.update_idletasks()
+                    root.update()
+                    log("无边框窗口聚焦：" + make_keyable(root))
+                    state["keyable"] = True
+                except Exception as e:
+                    log(f"窗口聚焦设置失败：{e!r}（下次显示时重试）")
         else:
             root.geometry("+-2000+-2000")            # 移出屏幕（仍映射，免去 deiconify）
             state["visible"] = False
@@ -492,10 +511,17 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
     text.bind("<Escape>", on_escape)
     text.bind("<Command-g>", toggle_ghost)
     text.bind("<Command-G>", toggle_ghost)
-    # 诊断日志（用户要求保留运行问题记录）：点击/焦点/按键事件进 pyin.log
+    # 诊断日志（用户要求保留运行问题记录）：焦点/点击事件恒记录；
+    # 按键事件仅在 --log-keys 时全量记录（否则只记非可打印键，避免打字刷屏）
+    def _diag(ev, sq):
+        if sq == "<Key>" and not log_keys:
+            ks = getattr(ev, "keysym", "") or ""
+            if len(ks) <= 1:
+                return
+        log(f"[诊断] 覆盖框事件 {sq} keysym={getattr(ev, 'keysym', '')} "
+            f"char={getattr(ev, 'char', '')!r}")
     for ev_seq in ("<FocusIn>", "<FocusOut>", "<Button-1>", "<Key>"):
-        text.bind(ev_seq, lambda e, sq=ev_seq: log(
-            f"[诊断] 覆盖框事件 {sq} keysym={getattr(e, 'keysym', '')} char={getattr(e, 'char', '')!r}"))
+        text.bind(ev_seq, lambda e, sq=ev_seq: _diag(e, sq))
 
     text.bind("<Escape>", on_escape)
     root.bind("<Escape>", on_escape)
@@ -543,10 +569,10 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
 
     root.update_idletasks()
     root.update()
-    try:
-        log("无边框窗口聚焦：" + make_keyable(root))
-    except Exception as e:
-        log(f"无边框窗口聚焦设置失败（若覆盖框无法输入请反馈）：{e!r}")
+    if native.PLATFORM != "darwin":
+        log("窗口聚焦：" + native.make_keyable(root))
+    # darwin：canBecomeKey swizzle 推迟到首次显示时应用——窗口须已映射，
+    # CGWindowList 才能枚举到（启动即调用会因窗口未注册而失败）
 
     start_hotkey(hotkey_cb, log, desc="暂停/恢复覆盖")
     root.after(int(POLL_INTERVAL * 1000), _poll)

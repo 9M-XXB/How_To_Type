@@ -1,4 +1,4 @@
-# pyin · 「更有趣（存疑）的输入方式」桌面原型（macOS · 微信 · Python）
+# pyin · 「更有趣（存疑）的输入方式」桌面原型（macOS / Windows / Linux · 微信 · Python）
 
 > 想法出处：作者原述（2026-11-13，详见作者工作区《想法记录》文档，未随仓库分发）· 方案依据：可行性调研 §1.1 档位 A·MVP（注入先例 Espanso）· 实施记录：可行性调研 §6
 > 本文由 ZCode（编码智能体，模型 GLM-5.3-Flash）编写（2026-11-17）· English: [README.en.md](README.en.md)
@@ -54,7 +54,7 @@ python3 pyin.py        # 无 .venv 时的降级模式（无热键；注入走 os
 
 定位三级降级（自动，启动与运行日志均记录）：**T1** 无障碍 AX 焦点元素（微信为自绘 UI，是否暴露焦点文本框以实机探测为准）→ **T2** 窗口边界 + 点偏移模型（常量 `list_w/right_m/box_h/bottom_m`，单位为点；由录屏逐帧测量推算，`--overlay-tune` 校准后保存 overlay_calib.json 持久生效）。Esc 或 ⌘⌥E 暂停覆盖（微信切走再切回自动恢复）。
 
-已知边界：微信 4.x 失焦时会自动收起窗口——实测（2026-11-20）**窗口其实不会收起**，仅前台轮询需要区分"微信前台/本应用前台/无关应用前台"三种情形；T2 推算矩形若与实际输入框有偏差，用 `--overlay-tune` 校准一次即可（overlay_calib.json 持久生效，不入库）。另：覆盖框为**无边框浮动面板形态**——覆盖框必须能取得键盘焦点，而 overrideredirect 无边框窗口无法成为 key window（实测：点击有 Button-1 事件但永远无 FocusIn，canBecomeKey 补丁也无效——该类窗口根本不参与 key 竞选），故用 Tk 官方留给 aqua 的 `::tk::unsupported::MacWindowStyle` 声明为 **floating 类（NSPanel 浮动面板）** 并以 objc swizzle 兜底；若仍出现无法输入请反馈并把 pyin.log 发来。覆盖框的隐藏采用**移出屏幕**方式（floating 面板的 withdraw 不可靠，面板残留原位会把注入的点击/粘贴吞回自己）；发送成功后覆盖框内容自动清空，失败则保留代码便于重试。
+已知边界：微信 4.x 失焦时会自动收起窗口——实测（2026-11-20）**窗口其实不会收起**，仅前台轮询需要区分"微信前台/本应用前台/无关应用前台"三种情形；T2 推算矩形若与实际输入框有偏差，用 `--overlay-tune` 校准一次即可（overlay_calib.json 持久生效，不入库，按平台分节保存）。另：覆盖框为**无边框浮动面板形态**（macOS 经 `::tk::unsupported::MacWindowStyle` floating 类 + objc swizzle 重写 canBecomeKey；Windows/Linux 的无边框窗口原生可聚焦）——覆盖框必须能取得键盘焦点，而 overrideredirect 无边框窗口无法成为 key window（实测：点击有 Button-1 事件但永远无 FocusIn）；若仍出现无法输入请反馈并把 pyin.log 发来。覆盖框的隐藏采用**移出屏幕**方式（floating 面板的 withdraw 不可靠，面板残留原位会把注入的点击/粘贴吞回自己）；发送成功后覆盖框内容自动清空，失败则保留代码便于重试。
 
 ## 首次使用必读：辅助功能授权
 
@@ -105,5 +105,20 @@ python3 pyin.py        # 无 .venv 时的降级模式（无热键；注入走 os
 
 - **方案**：可行性调研（作者工作区文档《调研笔记》，未随仓库分发）§1.1 档位 A（悬浮编辑器 + 显式触发 + 剪贴板注入 + 回车发送）与 §4 MVP 路线（本原型 = W1+W2 的 macOS 版）；注入先例 Espanso（espanso.org）。
 - **Apple API**（非工作区来源，官方文档）：CGEventTap / CGEventPost 键位常量（kVK_ANSI_V=9、kVK_Return=36、kVK_ANSI_E=14）；`AXIsProcessTrusted` 经 ctypes 直调 ApplicationServices 框架。
+
+## 跨平台（Windows / Linux）
+
+平台相关实现集中在 `native.py`（窗口枚举/前台判定/激活/点击/粘贴和弦/回车/剪贴板/热键），pyin 与 overlay 按其分派：
+
+| 平台 | 注入与剪贴板 | 定位 | 全局热键 | 授权 |
+|---|---|---|---|---|
+| **macOS** | CGEventPost + 私有 HID 源（swizzle canBecomeKey）+ pbcopy/pbpaste | T1 AX 焦点元素 + T2 点偏移模型 | CGEventTap ⌘⌥E | 辅助功能 |
+| **Windows** | SendInput（Ctrl+V / Return）+ CF_UNICODETEXT 剪贴板（纯 ctypes，零第三方依赖） | EnumWindows（标题 微信/WeChat 或类名 WeChatMainWndForPC/Weixin）+ T2 校准 | RegisterHotKey Ctrl+Alt+E | 无需授权 |
+| **Linux** | xdotool（key ctrl+v / Return、mousemove/click）+ xclip 剪贴板 | xdotool search（class wechat/weixin）+ T2 校准 | 暂不支持 | 无需授权（需 X11/XWayland） |
+
+- 每个平台的输入区校准独立保存（overlay_calib.json 按平台分节）。
+- Windows 的 `cmd_enter` 发送键等同 `ctrl_enter`（Windows 无 ⌘）。
+- Linux 需要 X11/XWayland 会话与 `xdotool`、`xclip`（缺失时启动日志会提示安装命令）；Wayland 原生会话暂不支持。
+- **诚实声明**：Windows/Linux 分支按官方 API 文档编写、**尚未在对应平台实测**；在对应平台遇到问题时请以 pyin.log 反馈。
 - **微信行为假设**（工作区内无核验依据，未逐版本验证）："按 Enter 发送消息"默认开启、粘贴可进入输入框、激活后焦点回到输入框。
 - **键位与首批范围**（作者 2026-11-17 指定）：Python 语言、微信目标、Enter=换行 / Shift+Enter=运行并发送、平台 macOS、**结果不加任何头原样直发**。
