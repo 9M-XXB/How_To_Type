@@ -29,8 +29,10 @@ import ctypes
 import json
 import os
 import queue
+import re
 import threading
 import time
+import traceback
 
 import pyin
 from pyin import (FOCUS_DELAY, PASTE_DELAY, WECHAT_NAMES, HAVE_QUARTZ,
@@ -91,6 +93,10 @@ _axvalueget.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.
 
 _kUTF8 = 0x08000100
 _kPointType = 1              # kAXValueCGPointType（CGSize 同为两个 double，布局一致）
+
+_AXERR = {-25211: "APIDisabled（辅助功能未授权）",
+          -25212: "CannotComplete（目标应用未响应 AX——微信自绘 UI 基本不实现，T2 为主力）",
+          -25202: "InvalidUIElement", -25206: "AttributeUnsupported"}
 
 
 # ---- 让无边框窗口可取得键盘焦点（运行时重写 canBecomeKey，objc 运行时 swizzle） ----
@@ -160,14 +166,30 @@ def make_keyable(root):
                            ctypes.c_void_p)(lambda s, c: True)
     _KEY_IMP_KEEPALIVE = imp                      # 保活引用，防 GC
     imp_ptr = ctypes.cast(imp, ctypes.c_void_p)
-    sel = sel_registerName(b"canBecomeKey")
-    m = class_getInstanceMethod(cls, sel)
+    # swizzle 后把样式置 0（完全无边框）：无边框 + canBecomeKey=YES = 可聚焦隐形窗口
+    # （macOS 可聚焦无边框窗口的标准配方）。setStyleMask 会把内容扩展进原标题栏区域，
+    # 调用方需随后重新对齐几何。
+    style_mask_read = ctypes.CFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p,
+                                       ctypes.c_void_p)(("objc_msgSend", appkit))
+    style_mask_write = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.c_void_p, ctypes.c_ulong)(("objc_msgSend", appkit))
+    sel_stylemask = sel_registerName(b"styleMask")
+    sel_setstyle = sel_registerName(b"setStyleMask:")
+    cur = style_mask_read(win, sel_stylemask)
+    # swizzle canBecomeKey（TKWindow 未实现该方法，继承自 NSWindow 的无边框默认 NO）
+    sel_kb = sel_registerName(b"canBecomeKey")
+    m = class_getInstanceMethod(cls, sel_kb)
+    swizzled = ""
     if m:
         method_setImplementation(m, imp_ptr)
-        return f"canBecomeKey 已重写（类 {cls_name}）"
-    if class_addMethod(cls, sel, imp_ptr, b"B@:"):
-        return f"canBecomeKey 已新增（类 {cls_name}）"
-    raise RuntimeError("canBecomeKey 重写失败")
+        swizzled = "已重写"
+    elif class_addMethod(cls, sel_kb, imp_ptr, b"B@:"):
+        swizzled = "已新增"
+    if not swizzled:
+        raise RuntimeError("canBecomeKey 重写失败")
+    # 再把样式置 0（完全无边框）：无边框 + canBecomeKey=YES = 可聚焦隐形窗口
+    style_mask_write(win, sel_setstyle, ctypes.c_ulong(0))
+    return f"canBecomeKey {swizzled} + 去标题栏（类 {cls_name}，样式 {cur:#x}→0x0）"
 
 
 def _cfstr(s):
@@ -235,17 +257,25 @@ def ax_input_rect(pid, win_h):
     """T1：微信进程的 AX 焦点元素 → (x, y, w, h)（全局屏幕点）。失败返回 (None, 原因)。"""
     try:
         app = _axcreateapp(int(pid))
-        err, el = _ax_get(app, "AXFocusedUIElement")
-        if err != 0 or not el:
-            return None, f"AX 焦点元素不可用（err={err}：未授权或微信内无焦点）"
+        last = "未知错误"
+        for _attempt in range(3):                 # CannotComplete 常见为偶发未响应，重试
+            ref = ctypes.c_void_p()
+            err = _axcopy(app, _cfstr("AXFocusedUIElement"), ctypes.byref(ref))
+            if err == 0 and ref.value:
+                break
+            last = _AXERR.get(err, f"err={err}")
+            time.sleep(0.15)
+        else:
+            return None, f"AX 焦点元素不可用（{last}）"
+        el = ref.value
         err, role_ref = _ax_get(el, "AXRole")
         role = _ax_str(role_ref)
         err, pref = _ax_get(el, "AXPosition")
         if err:
-            return None, f"AX 无位置属性（err={err}）"
+            return None, f"AX 无位置属性（{_AXERR.get(err, err)}）"
         err, sref = _ax_get(el, "AXSize")
         if err:
-            return None, f"AX 无尺寸属性（err={err}）"
+            return None, f"AX 无尺寸属性（{_AXERR.get(err, err)}）"
         pos, size = _ax_point(pref), _ax_point(sref)
         if not pos or not size:
             return None, "AX 位置/尺寸解析失败"
@@ -318,6 +348,10 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
     root.configure(bg="#1e1e1e")
     root.geometry("600x120+206+596")             # 初始占位，首轮定位后覆盖
 
+    def _tk_exc(etype, evalue, etb):
+        log("Tk 回调异常：\n" + "".join(traceback.format_exception(etype, evalue, etb)))
+    root.report_callback_exception = _tk_exc     # Tk 回调异常也进 pyin.log
+
     text = tk.Text(root, bg="#1e1e1e", fg="#d6d6d6", insertbackground="#d6d6d6",
                    relief="flat", wrap="word", font=("Menlo", 13), padx=8, pady=6,
                    selectbackground="#2f4a78", selectforeground="#ffffff")
@@ -365,17 +399,21 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
     text.bind("<Shift-KP_Enter>", on_run)
 
     def _worker(code, rect):
-        res = run_code(code)
-        out = format_result(res)
-        if not out:
-            q.put(("done", (None, "运行完成，无输出——未发送", 0)))
-            return
-        q.put(("hide", None))
-        time.sleep(0.2)
-        ok, msg = injector.send_result(out, click_rect=rect)
-        if res["timed_out"]:
-            msg += "（超时强制终止）"
-        q.put(("done", (ok, msg, len(out))))
+        try:
+            res = run_code(code)
+            out = format_result(res)
+            if not out:
+                q.put(("done", (None, "运行完成，无输出——未发送", 0)))
+                return
+            q.put(("hide", None))
+            time.sleep(0.2)
+            ok, msg = injector.send_result(out, click_rect=rect)
+            if res["timed_out"]:
+                msg += "（超时强制终止）"
+            q.put(("done", (ok, msg, len(out))))
+        except Exception:
+            log("运行线程异常：\n" + traceback.format_exc())
+            q.put(("done", (False, "内部错误（详见 pyin.log）", 0)))
 
     def _poll():
         try:
@@ -429,6 +467,10 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
     text.bind("<Escape>", on_escape)
     text.bind("<Command-g>", toggle_ghost)
     text.bind("<Command-G>", toggle_ghost)
+    # 诊断日志（用户要求保留运行问题记录）：点击/焦点/按键事件进 pyin.log
+    for ev_seq in ("<FocusIn>", "<FocusOut>", "<Button-1>", "<Key>"):
+        text.bind(ev_seq, lambda e, sq=ev_seq: log(
+            f"[诊断] 覆盖框事件 {sq} keysym={getattr(e, 'keysym', '')} char={getattr(e, 'char', '')!r}"))
 
     text.bind("<Escape>", on_escape)
     root.bind("<Escape>", on_escape)
@@ -468,8 +510,8 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
                     log(f"输入框定位更新：{how} → "
                         f"({rect[0]:.0f},{rect[1]:.0f}) {rect[2]:.0f}×{rect[3]:.0f}")
                 q.put(("show", None))
-            except Exception as e:
-                log(f"跟踪线程异常：{e!r}")
+            except Exception:
+                log("跟踪线程异常：\n" + traceback.format_exc())
 
     def hotkey_cb():
         q.put(("hotkey", None))
