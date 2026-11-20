@@ -24,31 +24,37 @@ The idea's **Tier A (MVP)** realized on macOS + WeChat: an always-on-top floatin
 ## Running
 
 ```bash
-./run.sh               # Recommended: uses code/.venv (with pyobjc → global hotkey + CGEvent injection)
+./run.sh               # Default mode = in-place overlay: the input box sits directly on WeChat's real input box, persistent
+./run.sh --overlay-tune  # Calibration: nudge the orange frame until it exactly matches the real input box, then save
+./run.sh --overlay-probe # Read-only probe: prints WeChat window bounds and input-area location
+./run.sh --editor      # Floating editor mode (the v0.1 free-position always-on-top editor)
 ./run.sh --dry-run     # No real injection: run+format as usual, injection prints to the terminal instead
 ./run.sh --selftest    # Offline self-test (no GUI / permission / WeChat needed)
 ./run.sh --doctor      # Read-only check: permission/backend/WeChat/frontmost — run this when nothing gets sent
-./run.sh --send-key cmd_enter   # Change the send key: enter (default) / cmd_enter / ctrl_enter
+./run.sh --send-key cmd_enter    # Change the send key: enter (default) / cmd_enter / ctrl_enter
 ./run.sh --send-engine osascript  # Change the injection engine for the send key (CGEvent / osascript paths)
 ./run.sh --probe-send  # Send probe: injects 4 tagged probes into a test chat to find which strategy sends (real injection)
 python3 pyin.py        # Degraded mode without .venv (no hotkey; injection via osascript, functionally equivalent)
 ```
 
+See the next section "In-place overlay mode" for the default mode.
+
 - The interpreter is whatever Python launches pyin; which third-party libraries you can import depends on it (the prototype itself needs only the standard library plus macOS built-ins `pbcopy`/`pbpaste`/`osascript`).
 - `.venv/` is gitignored. To rebuild: `python3 -m venv .venv && .venv/bin/pip install pyobjc-framework-Quartz`.
 
-## In-place overlay mode (`--overlay` · research tier B)
+## In-place overlay mode (default · research tier B)
+
+`./run.sh` enters this mode directly; use `--editor` for the floating editor. Calibration workflow:
 
 ```bash
-./run.sh --overlay          # The input box sits directly on WeChat's real input box, persistent
-./run.sh --overlay-probe    # Read-only probe: prints WeChat window bounds and input-area location
+./run.sh --overlay-tune    # nudge the orange frame with arrows/Shift+arrows, Enter saves overlay_calib.json
 ```
 
 A borderless input box **same size, same place** as WeChat's real input box (dark simulated style by default, `⌘G` toggles a 45% ghost form). It shows when WeChat is frontmost, hides when it isn't, and follows the box as it moves — an always-on in-place replacement. Keys match the floating editor: Enter newline, Shift+Enter run-and-send; before sending, the overlay steps aside and a synthetic click is placed on the center of the real input box (guaranteeing first-responder status for paste and Enter).
 
-Positioning falls back automatically (logged at startup and while running): **T1** Accessibility focused element (WeChat is custom-drawn; whether it exposes a focused text box is determined empirically) → **T2** window-bounds heuristic (constants `HEUR_*`; observe the actual rect with `--overlay-probe`, then tune them in wx_overlay.py). Esc or ⌘⌥E pauses the overlay (it resumes automatically after WeChat leaves and returns to the front).
+Positioning falls back automatically (logged at startup and while running): **T1** Accessibility focused element (WeChat is custom-drawn; whether it exposes a focused text box is determined empirically) → **T2** window bounds + point-offset model (constants `list_w/right_m/box_h/bottom_m`, in points; derived from frame-by-frame measurements of the recording, and persisted via overlay_calib.json once calibrated with `--overlay-tune`). Esc or ⌘⌥E pauses the overlay (it resumes automatically after WeChat leaves and returns to the front).
 
-Known edge: WeChat 4.x collapses its window when unfocused — the overlay hides accordingly via frontmost detection, which is expected. If the T2 heuristic rect is misaligned with the real input box, adjust the `HEUR_*` constants at the top of wx_overlay.py.
+Known edge: an unfocused WeChat window does **not** collapse — measured on 2026-11-20 — so the real input box stays visible under the overlay. The frontmost-polling distinguishes three cases (WeChat front / our own app front / unrelated app front). If the T2 rect is misaligned with the real input box, run `--overlay-tune` once; overlay_calib.json persists and is gitignored.
 
 ## First run: Accessibility permission (required)
 

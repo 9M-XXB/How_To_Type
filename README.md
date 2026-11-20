@@ -24,31 +24,37 @@
 ## 运行
 
 ```bash
-./run.sh               # 推荐：自动用 code/.venv（含 pyobjc → 有全局热键 + CGEvent 注入）
+./run.sh               # 默认模式 = 原位覆盖：输入框直接叠在微信真实输入框上，一次启动持续生效
+./run.sh --overlay-tune  # 输入区校准：微调橙色外框至与真实输入框完全重合，回车保存
+./run.sh --overlay-probe # 只读探测：打印微信窗口边界与输入区定位结果
+./run.sh --editor      # 悬浮编辑器模式（v0.1 的自由位置置顶编辑器）
 ./run.sh --dry-run     # 不真实注入：运行+格式化照常，注入改为打印到终端（无权限也能体验全流程）
 ./run.sh --selftest    # 离线自测（无需 GUI/授权/微信）
 ./run.sh --doctor      # 只读体检：授权/后端/微信/前台逐项检查，不注入任何按键——发不出去先跑它
-./run.sh --send-key cmd_enter   # 换发送键：enter（默认）/ cmd_enter / ctrl_enter
+./run.sh --send-key cmd_enter    # 换发送键：enter（默认）/ cmd_enter / ctrl_enter
 ./run.sh --send-engine osascript  # 换发送键的注入引擎（CGEvent / osascript 两条合成路径）
 ./run.sh --probe-send  # 发送探针：向测试聊天注入 4 条带标记探针，定位哪种方式能触发发送（真实注入）
 python3 pyin.py        # 无 .venv 时的降级模式（无热键；注入走 osascript，功能等价）
 ```
 
+默认模式的说明见下节「原位覆盖模式」。
+
 - 解释器 = 启动 pyin 的那个 Python；能 import 哪些第三方库取决于它（原型自身只用标准库 + macOS 自带 `pbcopy`/`pbpaste`/`osascript`）。
 - `.venv/` 已被 [.gitignore](.gitignore) 忽略；重建：`python3 -m venv .venv && .venv/bin/pip install pyobjc-framework-Quartz`。
 
-## 原位覆盖模式（`--overlay` · 调研档位 B）
+## 原位覆盖模式（默认模式 · 调研档位 B）
+
+直接 `./run.sh` 即进入本模式；`--editor` 切回悬浮编辑器。校准工作流：
 
 ```bash
-./run.sh --overlay          # 输入框直接叠在微信真实输入框上，一次启动持续生效
-./run.sh --overlay-probe    # 只读探测：打印微信窗口边界与输入区定位结果
+./run.sh --overlay-tune    # 方向键/Shift+方向键微调橙色外框，回车保存 overlay_calib.json
 ```
 
 无边框输入框与微信真实输入框**同位同尺寸**重叠（默认深色仿真样式，`⌘G` 切换 45% 幽灵形态）。微信在前台时自动显示、切走自动隐藏、窗口移动自动跟随——"一直开启"的原位替换输入体验。键位与悬浮编辑器一致：Enter 换行，Shift+Enter 运行并发送；发送前覆盖框自动让位，并对真实输入框中心补一次合成点击（保证粘贴与回车落在真正的第一响应者上）。
 
-定位三级降级（自动，启动与运行日志均记录）：**T1** 无障碍 AX 焦点元素（微信为自绘 UI，是否暴露焦点文本框以实机探测为准）→ **T2** 窗口边界比例启发式（常量 `HEUR_*`，`--overlay-probe` 观测实际矩形后在 wx_overlay.py 调整）。Esc 或 ⌘⌥E 暂停覆盖（微信切走再切回自动恢复）。
+定位三级降级（自动，启动与运行日志均记录）：**T1** 无障碍 AX 焦点元素（微信为自绘 UI，是否暴露焦点文本框以实机探测为准）→ **T2** 窗口边界 + 点偏移模型（常量 `list_w/right_m/box_h/bottom_m`，单位为点；由录屏逐帧测量推算，`--overlay-tune` 校准后保存 overlay_calib.json 持久生效）。Esc 或 ⌘⌥E 暂停覆盖（微信切走再切回自动恢复）。
 
-已知边界：微信 4.x 失焦时会自动收起窗口——覆盖框随前台检测自动隐藏，属预期行为；T2 启发式矩形若与实际输入框有偏差，调整 wx_overlay.py 顶部 `HEUR_*` 比例常量即可。
+已知边界：微信 4.x 失焦时会自动收起窗口——实测（2026-11-20）**窗口其实不会收起**，仅前台轮询需要区分"微信前台/本应用前台/无关应用前台"三种情形；T2 推算矩形若与实际输入框有偏差，用 `--overlay-tune` 校准一次即可（overlay_calib.json 持久生效，不入库）。
 
 ## 首次使用必读：辅助功能授权
 

@@ -26,6 +26,8 @@ wx_overlay —— pyin 原位覆盖模式（可行性调研档位 B 的 macOS �
 """
 
 import ctypes
+import json
+import os
 import queue
 import threading
 import time
@@ -37,8 +39,35 @@ from pyin import (FOCUS_DELAY, PASTE_DELAY, WECHAT_NAMES, HAVE_QUARTZ,
 
 POLL_INTERVAL = 0.5          # 前台/位置轮询周期（秒）
 MIN_RECT = 60                # 输入框最小合理边长（点），过小视为定位失败
-# T2 启发式：输入区占聊天窗口边界的比例（按实拍微信窗口标定，可调）
-HEUR = {"x0": 0.135, "x1": 0.995, "y0": 0.785, "y1": 0.955}
+
+# T2 启发式：以"点"（point）为单位的固定偏移模型（由录屏逐帧测量推算；
+# 用 --overlay-tune 交互校准后保存 overlay_calib.json 覆盖，.gitignore 已排除）：
+#   list_w   输入区左缘 = 窗口左缘 + list_w（聊天列表宽度，固定点数而非比例——
+#            实测列表宽不随窗口尺寸等比变化）
+#   right_m  输入区右缘 = 窗口右缘 - right_m
+#   box_h    输入框高度
+#   bottom_m 输入框底缘 = 窗口底缘 - bottom_m
+CALIB_DEFAULT = {"list_w": 163.0, "right_m": 3.0, "box_h": 80.0, "bottom_m": 81.0}
+CALIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "overlay_calib.json")
+
+
+def load_calib():
+    calib = dict(CALIB_DEFAULT)
+    try:
+        with open(CALIB_PATH, encoding="utf-8") as f:
+            calib.update({k: float(v) for k, v in json.load(f).items() if k in calib})
+        log(f"已加载输入区校准 overlay_calib.json：{ {k: round(v) for k, v in calib.items()} }")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log(f"校准文件读取失败（用默认值）：{e!r}")
+    return calib
+
+
+def save_calib(calib):
+    with open(CALIB_PATH, "w", encoding="utf-8") as f:
+        json.dump({k: round(v, 1) for k, v in calib.items()}, f, ensure_ascii=False, indent=1)
+    log(f"输入区校准已保存 → {CALIB_PATH}")
 
 # ---- AX ctypes 桥（非工作区来源：Apple ApplicationServices/HIServices） --------
 _coref = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
@@ -154,33 +183,34 @@ def ax_input_rect(pid, win_h):
         return None, f"AX 调用异常 [{e!r}]"
 
 
-def heuristic_rect(win):
-    """T2：微信聊天窗口边界 → 输入区推算矩形（比例常量 HEUR_*）。"""
+def heuristic_rect(win, calib):
+    """T2：微信聊天窗口边界 + 点偏移模型 → 输入区推算矩形。"""
     X, Y, W, H = win
-    return (X + W * HEUR["x0"], Y + H * HEUR["y0"],
-            W * (HEUR["x1"] - HEUR["x0"]), H * (HEUR["y1"] - HEUR["y0"]))
+    return (X + calib["list_w"], Y + H - calib["bottom_m"] - calib["box_h"],
+            max(80.0, W - calib["list_w"] - calib["right_m"]), calib["box_h"])
 
 
-def locate(max_win):
+def locate(max_win, calib):
     """返回 (rect, how)。rect 为全局屏幕点 (x, y, w, h)；定位失败 → (None, 原因)。"""
     win_pids = {pid for pid, _ in max_win}
     win_h = max((b[3] for _, b in max_win), default=0)
+    last_ax = "微信窗口不可见"
     for pid in win_pids:
         rect, how = ax_input_rect(pid, win_h)
+        last_ax = how
         if rect:
             return rect, how
-        last_ax = how
     win = max(max_win, key=lambda t: t[1][2] * t[1][3])[1]
     if win[2] < MIN_RECT or win[3] < MIN_RECT:
-        return None, last_ax if win_pids else "微信窗口不可见"
-    return heuristic_rect(win), f"T2 窗口启发式（{last_ax}）"
+        return None, last_ax
+    return heuristic_rect(win, calib), f"T2 窗口启发式（T1：{last_ax}）"
 
 
-def locate_safe(max_win):
+def locate_safe(max_win, calib):
     """locate 的防退化版：结果异常尺寸时回退启发式。"""
-    rect, how = locate(max_win)
+    rect, how = locate(max_win, calib)
     if rect and (rect[2] < MIN_RECT or rect[3] < MIN_RECT or rect[2] > 4000):
-        rect2 = heuristic_rect(max(max_win, key=lambda t: t[1][2] * t[1][3])[1])
+        rect2 = heuristic_rect(max(max_win, key=lambda t: t[1][2] * t[1][3])[1], calib)
         return rect2, f"T2 启发式（T1 异常矩形 {how}）"
     return rect, how
 
@@ -197,6 +227,7 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
 
     log(f"原位覆盖模式启动（档位 B）：注入后端 {injector.backend}，发送键 {injector.send_key}"
         f"（引擎 {injector.send_engine}）" + ("（dry-run）" if dry_run else ""))
+    calib = load_calib()
     trusted = pyin.accessibility_trusted()
     log("辅助功能授权：" + ("已授权" if trusted else
                            "未授权（AX 定位与注入都会失败/被丢弃）" if trusted is False else "无法判定"))
@@ -326,21 +357,21 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
                 front, owner = wechat_front()
                 if state["busy"]:
                     continue                      # 注入进行中不动窗口
-                if not front:
+                wins = wechat_windows()
+                we_front = bool(front) and any(n in owner for n in WECHAT_NAMES)
+                we_own = bool(front) and "python" in owner.lower()
+                if not wins or not (we_front or we_own):
+                    # 微信窗口不可见，或前台是无关应用 → 隐藏（本应用前台=正在打字，保持显示）
                     if state["visible"]:
                         q.put(("hide", None))
                     if state["paused"]:
-                        state["paused"] = False   # 微信切走即自动恢复"一直开启"
-                        q.put(("status", ("已恢复跟随（微信重新到前台时显示）", "gray")))
+                        state["paused"] = False   # 场景已离开，暂停自动解除
+                        q.put(("status", ("已恢复跟随", "gray")))
                     last_key = None
                     continue
                 if state["paused"]:
                     continue
-                wins = wechat_windows()
-                if not wins:
-                    continue
-                state["wechat_seen"] = True
-                rect, how = locate_safe(wins)
+                rect, how = locate_safe(wins, calib)
                 if not rect:
                     q.put(("status", (f"定位失败：{how}", "red")))
                     continue
@@ -366,27 +397,92 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
     root.mainloop()
 
 
-# ---- 只读探测（--overlay-probe） --------------------------------------------------
+# ---- 只读探测（--overlay-probe） 与 交互校准（--overlay-tune） --------------------
 def probe_only(injector):
+    calib = load_calib()
     front, owner = wechat_front()
     print(f"[pyin] 前台应用：{owner or '未知'}"
           + ("（微信在前台 ✓）" if any(n in owner for n in WECHAT_NAMES) else ""))
     wins = wechat_windows()
     if not wins:
-        print("[pyin] 微信窗口：未找到（微信未在运行或全部窗口隐藏）")
+        print("[pyin] 微信窗口：未找到（微信未在运行或窗口已收起）")
         return 1
     for pid, b in wins:
         print(f"[pyin] 微信窗口：pid={pid} 位置=({b[0]:.0f},{b[1]:.0f}) "
               f"大小={b[2]:.0f}×{b[3]:.0f}")
-    rect, how = locate_safe(wins)
+    rect, how = locate_safe(wins, calib)
     if rect:
         print(f"[pyin] 输入框定位：{how}")
         print(f"[pyin]   矩形 = ({rect[0]:.0f}, {rect[1]:.0f}) "
               f"{rect[2]:.0f}×{rect[3]:.0f}（全局屏幕点）")
-        print("[pyin] 提示：T1=AX 焦点元素（微信需有焦点文本框）；"
-              "T2=窗口启发式（比例常量 HEUR_*，可在 wx_overlay.py 调整）")
+        print("[pyin] 对齐校准：./run.sh --overlay-tune（方向键微调橙色外框，回车保存）")
     else:
         print(f"[pyin] 输入框定位失败：{how}")
-        print("[pyin] 提示：T1 需要辅助功能授权 + 微信内存在焦点文本框；"
-              "T2 只依赖窗口边界。")
     return 0 if rect else 1
+
+
+def tune():
+    """--overlay-tune：输入区交互校准。微信窗口需可见（实测失焦不收起）。
+
+    点击橙色外框取得键盘焦点后：←→ 调 list_w（整框横移），↑↓ 调 bottom_m（整框竖移），
+    Shift+←→ 调 right_m（右缘外扩/收），Shift+↑↓ 调 box_h（高度），r 恢复默认，
+    回车保存 overlay_calib.json 并退出，Esc 放弃不保存。"""
+    calib = load_calib()
+    wins = wechat_windows()
+    if not wins:
+        print("[pyin] 微信窗口不可见——先打开微信并停留在某个聊天（实测窗口失焦不会收起）")
+        return 1
+    win = max(wins, key=lambda t: t[1][2] * t[1][3])[1]
+    import tkinter as tk
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.configure(bg="#ff9500", highlightthickness=3, highlightbackground="#ff9500")
+    label = tk.Label(root, text="", bg="#ff9500", fg="#111", font=("Menlo", 11), padx=4)
+
+    def apply():
+        x, y, w, h = heuristic_rect(win, calib)
+        root.geometry(f"{max(80, int(w)):.0f}x{max(48, int(h)):.0f}"
+                      f"+{int(x):.0f}+{int(y):.0f}")
+        label.configure(text=f"list_w={calib['list_w']:.0f}  right_m={calib['right_m']:.0f}  "
+                             f"box_h={calib['box_h']:.0f}  bottom_m={calib['bottom_m']:.0f}"
+                             "  |  ←→↑↓ 移动 · Shift+方向 调宽高 · r 复位 · 回车保存 · Esc 放弃")
+        label.place(x=6, y=6)
+
+    def nudge(dx, dy):
+        calib["list_w"] = max(0.0, calib["list_w"] + dx)
+        calib["bottom_m"] = max(0.0, calib["bottom_m"] + dy)
+        apply()
+
+    def resize(dw, dh):
+        calib["right_m"] = max(0.0, calib["right_m"] + dw)
+        calib["box_h"] = max(24.0, calib["box_h"] + dh)
+        apply()
+
+    def reset(_e):
+        calib.update(dict(CALIB_DEFAULT))
+        apply()
+        return "break"
+
+    def save(_e):
+        save_calib(calib)
+        root.destroy()
+        return "break"
+
+    def quit_no_save(_e):
+        root.destroy()
+        return "break"
+
+    apply()
+    keys = (("<Left>", lambda e: nudge(-1, 0)), ("<Right>", lambda e: nudge(1, 0)),
+            ("<Up>", lambda e: nudge(0, -1)), ("<Down>", lambda e: nudge(0, 1)),
+            ("<Shift-Left>", lambda e: resize(1, 0)), ("<Shift-Right>", lambda e: resize(-1, 0)),
+            ("<Shift-Up>", lambda e: resize(0, -1)), ("<Shift-Down>", lambda e: resize(0, 1)),
+            ("r", reset), ("<Return>", save), ("<Escape>", quit_no_save))
+    for seq, fn in keys:
+        root.bind(seq, lambda e, fn=fn: (fn(e), "break")[1])
+
+    print("[pyin] 校准开始：点击橙色外框取得键盘焦点，方向键/Shift+方向键微调至"
+          "与微信输入框完全重合，回车保存并退出（Esc 放弃）。微信窗口保持可见即可。")
+    root.mainloop()
+    return 0

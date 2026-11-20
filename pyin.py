@@ -728,8 +728,13 @@ def main():
                     help="发送策略探针：向微信测试聊天注入 4 条带标记探针，"
                          "定位哪种方式能触发发送（真实注入！）")
     ap.add_argument("--overlay", action="store_true",
-                    help="原位覆盖模式（档位 B）：输入框直接叠在微信真实输入框上，"
-                         "随微信前台自动显隐并跟随（Esc 暂停 · ⌘G 幽灵形态）")
+                    help="原位覆盖模式（档位 B，默认无需此参数）：输入框直接叠在微信真实"
+                         "输入框上，随微信前台自动显隐并跟随（Esc 暂停 · ⌘G 幽灵形态）")
+    ap.add_argument("--editor", action="store_true",
+                    help="悬浮编辑器模式（自由位置的置顶编辑器；v0.1 的原默认行为）")
+    ap.add_argument("--overlay-tune", action="store_true",
+                    help="输入区交互校准：方向键/Shift+方向键微调橙色外框至与微信输入框"
+                         "完全重合，回车保存 overlay_calib.json（Esc 放弃）")
     ap.add_argument("--overlay-probe", action="store_true",
                     help="只读探测：打印微信窗口边界与输入区定位结果，不启动界面")
     args = ap.parse_args()
@@ -739,13 +744,20 @@ def main():
         sys.exit(doctor())
     if args.probe_send:
         sys.exit(probe_send())
-    if args.overlay or args.overlay_probe:
-        import overlay
-        overlay.run(dry_run=args.dry_run, send_key=args.send_key,
-                    send_engine=args.send_engine, probe=args.overlay_probe)
+    import overlay
+    if args.overlay_probe:
+        overlay.run(probe=True)
         return
-    Editor(dry_run=args.dry_run, send_key=args.send_key,
-           send_engine=args.send_engine).run()
+    if args.overlay_tune:
+        sys.exit(overlay.tune())
+    if args.editor:
+        Editor(dry_run=args.dry_run, send_key=args.send_key,
+               send_engine=args.send_engine).run()
+        return
+    # 默认模式：原位覆盖（档位 B）
+    overlay.run(dry_run=args.dry_run, send_key=args.send_key,
+                send_engine=args.send_engine)
+    return
 
 
 if __name__ == "__main__":
