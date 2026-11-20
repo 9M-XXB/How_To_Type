@@ -252,6 +252,23 @@ class Injector:
             # osascript 引擎：另一条合成路径（部分应用对 CGEvent 合成 Return 不响应时试它）
             self._osa(f'tell application "System Events" to key code {keycode}{osa_mods}')
 
+    def click_at(self, px, py):
+        """在全局屏幕坐标 (px, py)（点）合成左键单击——保证目标输入框成为第一响应者。
+        事件源与按键注入一致（私有 HID 源）。原位覆盖模式（档位 B）注入链使用。"""
+        if HAVE_QUARTZ:
+            move = Quartz.CGEventCreateMouseEvent(self._src, Quartz.kCGEventMouseMoved,
+                                                  (px, py), Quartz.kCGMouseButtonLeft)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
+            time.sleep(0.05)
+            for etype in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
+                ev = Quartz.CGEventCreateMouseEvent(self._src, etype, (px, py),
+                                                    Quartz.kCGMouseButtonLeft)
+                Quartz.CGEventSetFlags(ev, 0)
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+                time.sleep(0.03)
+        else:
+            self._osa(f'tell application "System Events" to click at {{{int(px)}, {int(py)}}}')
+
     # -- 激活与核实 -------------------------------------------------------------
     def activate_wechat(self):
         p = subprocess.run(["osascript", "-e", ACTIVATE_SCRIPT],
@@ -273,7 +290,7 @@ class Injector:
         return True, ""
 
     # -- 主链 -------------------------------------------------------------------
-    def send_result(self, text):
+    def send_result(self, text, click_rect=None):
         if self.dry:
             log("—— dry-run：以下内容将经「激活微信 → Cmd+V → Enter」注入发送 ——")
             print(text, flush=True)
@@ -299,6 +316,12 @@ class Injector:
             return False, err
         time.sleep(FOCUS_DELAY)
         try:
+            if click_rect:
+                # 原位覆盖模式：先点一下真实输入框中心，确保它是第一响应者，
+                # 粘贴与回车才不会落空（覆盖框此刻已隐藏）
+                self.click_at(click_rect[0] + click_rect[2] / 2,
+                              click_rect[1] + click_rect[3] / 2)
+                time.sleep(0.25)
             self.paste()
             time.sleep(PASTE_DELAY)
             self.enter()
@@ -322,7 +345,7 @@ class Injector:
 # 全局热键（可选，需 pyobjc + 辅助功能权限；失败只禁用热键，不影响其余功能）
 # =============================================================================
 
-def start_hotkey(on_hotkey, on_log):
+def start_hotkey(on_hotkey, on_log, desc=None):
     """⌘⌥E 全局热键（ListenOnly tap，不吞键）。回调只做 queue.put（线程安全）。"""
     if not HAVE_QUARTZ:
         on_log("未安装 pyobjc Quartz：全局热键不可用（用 Dock/点击窗口代替）")
@@ -354,7 +377,7 @@ def start_hotkey(on_hotkey, on_log):
             Quartz.CFRunLoopAddSource(Quartz.CFRunLoopGetCurrent(), src,
                                       Quartz.kCFRunLoopDefaultMode)
             Quartz.CGEventTapEnable(tap, True)
-            on_log(f"全局热键已启用：{HOTKEY_LABEL} 呼出/隐藏编辑器")
+            on_log(f"全局热键已启用：{HOTKEY_LABEL} {desc or '呼出/隐藏编辑器'}")
             Quartz.CFRunLoopRun()
         except Exception as e:
             on_log(f"热键线程异常退出：{e!r}（其余功能不受影响）")
@@ -704,6 +727,11 @@ def main():
     ap.add_argument("--probe-send", action="store_true",
                     help="发送策略探针：向微信测试聊天注入 4 条带标记探针，"
                          "定位哪种方式能触发发送（真实注入！）")
+    ap.add_argument("--overlay", action="store_true",
+                    help="原位覆盖模式（档位 B）：输入框直接叠在微信真实输入框上，"
+                         "随微信前台自动显隐并跟随（Esc 暂停 · ⌘G 幽灵形态）")
+    ap.add_argument("--overlay-probe", action="store_true",
+                    help="只读探测：打印微信窗口边界与输入区定位结果，不启动界面")
     args = ap.parse_args()
     if args.selftest:
         sys.exit(selftest())
@@ -711,6 +739,11 @@ def main():
         sys.exit(doctor())
     if args.probe_send:
         sys.exit(probe_send())
+    if args.overlay or args.overlay_probe:
+        import overlay
+        overlay.run(dry_run=args.dry_run, send_key=args.send_key,
+                    send_engine=args.send_engine, probe=args.overlay_probe)
+        return
     Editor(dry_run=args.dry_run, send_key=args.send_key,
            send_engine=args.send_engine).run()
 

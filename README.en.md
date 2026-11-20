@@ -37,6 +37,19 @@ python3 pyin.py        # Degraded mode without .venv (no hotkey; injection via o
 - The interpreter is whatever Python launches pyin; which third-party libraries you can import depends on it (the prototype itself needs only the standard library plus macOS built-ins `pbcopy`/`pbpaste`/`osascript`).
 - `.venv/` is gitignored. To rebuild: `python3 -m venv .venv && .venv/bin/pip install pyobjc-framework-Quartz`.
 
+## In-place overlay mode (`--overlay` · research tier B)
+
+```bash
+./run.sh --overlay          # The input box sits directly on WeChat's real input box, persistent
+./run.sh --overlay-probe    # Read-only probe: prints WeChat window bounds and input-area location
+```
+
+A borderless input box **same size, same place** as WeChat's real input box (dark simulated style by default, `⌘G` toggles a 45% ghost form). It shows when WeChat is frontmost, hides when it isn't, and follows the box as it moves — an always-on in-place replacement. Keys match the floating editor: Enter newline, Shift+Enter run-and-send; before sending, the overlay steps aside and a synthetic click is placed on the center of the real input box (guaranteeing first-responder status for paste and Enter).
+
+Positioning falls back automatically (logged at startup and while running): **T1** Accessibility focused element (WeChat is custom-drawn; whether it exposes a focused text box is determined empirically) → **T2** window-bounds heuristic (constants `HEUR_*`; observe the actual rect with `--overlay-probe`, then tune them in wx_overlay.py). Esc or ⌘⌥E pauses the overlay (it resumes automatically after WeChat leaves and returns to the front).
+
+Known edge: WeChat 4.x collapses its window when unfocused — the overlay hides accordingly via frontmost detection, which is expected. If the T2 heuristic rect is misaligned with the real input box, adjust the `HEUR_*` constants at the top of wx_overlay.py.
+
 ## First run: Accessibility permission (required)
 
 Typing the result "into" WeChat relies on **system-level key injection** (CGEventPost or osascript keystroke — same trust requirement):

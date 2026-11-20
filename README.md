@@ -37,6 +37,19 @@ python3 pyin.py        # 无 .venv 时的降级模式（无热键；注入走 os
 - 解释器 = 启动 pyin 的那个 Python；能 import 哪些第三方库取决于它（原型自身只用标准库 + macOS 自带 `pbcopy`/`pbpaste`/`osascript`）。
 - `.venv/` 已被 [.gitignore](.gitignore) 忽略；重建：`python3 -m venv .venv && .venv/bin/pip install pyobjc-framework-Quartz`。
 
+## 原位覆盖模式（`--overlay` · 调研档位 B）
+
+```bash
+./run.sh --overlay          # 输入框直接叠在微信真实输入框上，一次启动持续生效
+./run.sh --overlay-probe    # 只读探测：打印微信窗口边界与输入区定位结果
+```
+
+无边框输入框与微信真实输入框**同位同尺寸**重叠（默认深色仿真样式，`⌘G` 切换 45% 幽灵形态）。微信在前台时自动显示、切走自动隐藏、窗口移动自动跟随——"一直开启"的原位替换输入体验。键位与悬浮编辑器一致：Enter 换行，Shift+Enter 运行并发送；发送前覆盖框自动让位，并对真实输入框中心补一次合成点击（保证粘贴与回车落在真正的第一响应者上）。
+
+定位三级降级（自动，启动与运行日志均记录）：**T1** 无障碍 AX 焦点元素（微信为自绘 UI，是否暴露焦点文本框以实机探测为准）→ **T2** 窗口边界比例启发式（常量 `HEUR_*`，`--overlay-probe` 观测实际矩形后在 wx_overlay.py 调整）。Esc 或 ⌘⌥E 暂停覆盖（微信切走再切回自动恢复）。
+
+已知边界：微信 4.x 失焦时会自动收起窗口——覆盖框随前台检测自动隐藏，属预期行为；T2 启发式矩形若与实际输入框有偏差，调整 wx_overlay.py 顶部 `HEUR_*` 比例常量即可。
+
 ## 首次使用必读：辅助功能授权
 
 把运行结果"打进"微信靠的是**系统级按键模拟**（CGEventPost 或 osascript keystroke，两者同源），必须授权：
