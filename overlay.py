@@ -339,11 +339,14 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
     log("辅助功能授权：" + ("已授权" if trusted else
                            "未授权（AX 定位与注入都会失败/被丢弃）" if trusted is False else "无法判定"))
 
-    TITLE_H = 0                   # 无边框：窗口框与内容重合，无需标题栏补偿
+    TITLE_H = 0                   # 浮动面板无边框：窗口框与内容重合，无需标题栏补偿
     root = tk.Tk()
-    # 无边框窗口 + 运行时重写 canBecomeKey（见 make_keyable）：既隐形又能取得键盘焦点。
-    # （首版曾用带标题栏的普通窗口绕过焦点问题，应要求改为无边框隐形形态。）
-    root.overrideredirect(True)
+    root.withdraw()               # 先隐藏：窗口类必须在映射前设置
+    # 浮动面板（NSPanel）：无边框、点击可成为 key window 接收键盘——overrideredirect
+    # 无边框窗口无法成为 key window（用户实测：Button-1 有事件但无 FocusIn，键盘收不到；
+    # canBecomeKey 补丁亦无效，因该类窗口根本不参与 key 竞选）。浮动类是 Tk 官方留给
+    # aqua 的窗口类设置口 ::tk::unsupported::MacWindowStyle（须在映射前调用）。
+    root.tk.call("::tk::unsupported::MacWindowStyle", "style", root, "floating", "none")
     root.attributes("-topmost", True)
     root.configure(bg="#1e1e1e")
     root.geometry("600x120+206+596")             # 初始占位，首轮定位后覆盖
