@@ -93,6 +93,83 @@ _kUTF8 = 0x08000100
 _kPointType = 1              # kAXValueCGPointType（CGSize 同为两个 double，布局一致）
 
 
+# ---- 让无边框窗口可取得键盘焦点（运行时重写 canBecomeKey，objc 运行时 swizzle） ----
+# macOS：borderless NSWindow 默认 canBecomeKey=NO——点击不聚焦、键盘事件收不到
+# （实测：--overlay-tune 首版即因此不可调整）。通过 objc 运行时把窗口实际类的
+# canBecomeKey 实现替换为恒真，仅影响本进程自己的窗口（非工作区来源：Apple ObjC
+# 运行时 API + 通用 swizzle 技法）。
+_KEY_IMP_KEEPALIVE = None    # 防止新 IMP 被 GC（重写后必须保活）
+
+def make_keyable(root):
+    objc = ctypes.CDLL("/usr/lib/libobjc.dylib")
+    appkit = ctypes.CDLL("/System/Library/Frameworks/AppKit.framework/AppKit")
+
+    def _set(fn, restype, argtypes):
+        fn.restype = restype
+        fn.argtypes = argtypes
+        return fn
+
+    objc_getClass = _set(objc.objc_getClass, ctypes.c_void_p, [ctypes.c_char_p])
+    sel_registerName = _set(objc.sel_registerName, ctypes.c_void_p, [ctypes.c_char_p])
+    object_getClass = _set(objc.object_getClass, ctypes.c_void_p, [ctypes.c_void_p])
+    class_getName = _set(objc.class_getName, ctypes.c_char_p, [ctypes.c_void_p])
+    class_getInstanceMethod = _set(objc.class_getInstanceMethod, ctypes.c_void_p,
+                                   [ctypes.c_void_p, ctypes.c_void_p])
+    class_addMethod = _set(objc.class_addMethod, ctypes.c_bool,
+                           [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                            ctypes.c_char_p])
+    method_getImplementation = _set(objc.method_getImplementation, ctypes.c_void_p,
+                                    [ctypes.c_void_p])
+    method_setImplementation = _set(objc.method_setImplementation, None,
+                                    [ctypes.c_void_p, ctypes.c_void_p])
+    # objc_msgSend 是变参函数：按调用签名取两个独立原型（共享 argtypes 会互相覆盖）
+    msg_send0 = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p,
+                                 ctypes.c_void_p)(("objc_msgSend", appkit))
+    msg_send_win = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p,
+                                    ctypes.c_void_p, ctypes.c_long)(("objc_msgSend", appkit))
+
+    nsapp = msg_send0(objc_getClass(b"NSApplication"),
+                      sel_registerName(b"sharedApplication"))
+    # winfo_id 在 aqua 上不是 NSWindow 编号，且 Tk 无边框窗口的 CG frame 与 Tk 几何
+    # 存在内边距差（实测 CG 报 212,597 588×118 vs 几何 206,596 600×120，且需
+    # kCGWindowListOptionAll 才能枚举到）——覆盖模式下本进程只有这一个窗口，
+    # 直接取本进程面积最大的窗口编号即可。
+    import Quartz
+    best = None
+    for w in Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionAll, Quartz.kCGNullWindowID) or []:
+        if w.get("kCGWindowOwnerPID") != os.getpid():
+            continue
+        b = w.get("kCGWindowBounds", {})
+        area = b.get("Width", 0) * b.get("Height", 0)
+        if area >= 10000 and (best is None or area > best[0]):
+            best = (area, w.get("kCGWindowNumber"))
+    if best is None:
+        raise RuntimeError("CGWindowList(All) 中未找到本进程窗口")
+    win = msg_send_win(nsapp, sel_registerName(b"windowWithWindowNumber:"),
+                       ctypes.c_long(int(best[1])))
+    if not win:
+        raise RuntimeError(f"windowWithWindowNumber({best[1]}) 未找到窗口")
+    if not win:
+        raise RuntimeError("未找到 Tk 对应的 NSWindow（winfo_id 无效）")
+    cls = object_getClass(win)
+    cls_name = class_getName(cls).decode("ascii", "replace")
+
+    global _KEY_IMP_KEEPALIVE
+    imp = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p,
+                           ctypes.c_void_p)(lambda s, c: True)
+    _KEY_IMP_KEEPALIVE = imp                      # 保活引用，防 GC
+    imp_ptr = ctypes.cast(imp, ctypes.c_void_p)
+    sel = sel_registerName(b"canBecomeKey")
+    m = class_getInstanceMethod(cls, sel)
+    if m:
+        method_setImplementation(m, imp_ptr)
+        return f"canBecomeKey 已重写（类 {cls_name}）"
+    if class_addMethod(cls, sel, imp_ptr, b"B@:"):
+        return f"canBecomeKey 已新增（类 {cls_name}）"
+    raise RuntimeError("canBecomeKey 重写失败")
+
+
 def _cfstr(s):
     return _cfstr_raw(None, s.encode("utf-8"), _kUTF8)
 
@@ -232,19 +309,14 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
     log("辅助功能授权：" + ("已授权" if trusted else
                            "未授权（AX 定位与注入都会失败/被丢弃）" if trusted is False else "无法判定"))
 
-    TITLE_H = 28                  # 实测：aqua Tk 几何为窗口框空间，内容顶 = 几何 y + 28
+    TITLE_H = 0                   # 无边框：窗口框与内容重合，无需标题栏补偿
     root = tk.Tk()
-    # macOS 的 overrideredirect 无边框窗口无法成为 key window（点击不取得键盘焦点，
-    # 实测 --overlay-tune 即因此无法调整）——改用带精简标题栏的普通窗口；几何定位
-    # 补偿标题栏高度后，内容区仍与真实输入框精确重合。
-    root.title("pyin 原位覆盖 · Enter 换行 · Shift+Enter 运行发送")
-    try:
-        root.attributes("-toolwindow", 1)    # 收窄标题栏（属性不支持时静默跳过）
-    except tk.TclError:
-        pass
+    # 无边框窗口 + 运行时重写 canBecomeKey（见 make_keyable）：既隐形又能取得键盘焦点。
+    # （首版曾用带标题栏的普通窗口绕过焦点问题，应要求改为无边框隐形形态。）
+    root.overrideredirect(True)
     root.attributes("-topmost", True)
     root.configure(bg="#1e1e1e")
-    root.geometry("600x148+206+568")         # 初始占位（含 28pt 标题栏），首轮定位后覆盖
+    root.geometry("600x120+206+596")             # 初始占位，首轮定位后覆盖
 
     text = tk.Text(root, bg="#1e1e1e", fg="#d6d6d6", insertbackground="#d6d6d6",
                    relief="flat", wrap="word", font=("Menlo", 13), padx=8, pady=6,
@@ -315,9 +387,8 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
                     _show(True)
                 elif kind == "move":
                     x, y, w, h = payload
-                    # 几何为窗口框空间：内容区精确对齐 rect，标题栏悬在其上方 28pt
                     root.geometry(f"{max(80, int(w)):.0f}x{max(48, int(h)):.0f}"
-                                  f"+{int(x):.0f}+{int(y - TITLE_H):.0f}")
+                                  f"+{int(x):.0f}+{int(y):.0f}")
                 elif kind == "status":
                     set_status(*payload)
                 elif kind == "hotkey":
@@ -402,6 +473,13 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
 
     def hotkey_cb():
         q.put(("hotkey", None))
+
+    root.update_idletasks()
+    root.update()
+    try:
+        log("无边框窗口聚焦：" + make_keyable(root))
+    except Exception as e:
+        log(f"无边框窗口聚焦设置失败（若覆盖框无法输入请反馈）：{e!r}")
 
     start_hotkey(hotkey_cb, log, desc="暂停/恢复覆盖")
     root.after(int(POLL_INTERVAL * 1000), _poll)
