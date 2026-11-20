@@ -291,9 +291,6 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
 
     text.bind("<Shift-Return>", on_run)
     text.bind("<Shift-KP_Enter>", on_run)
-    text.bind("<Escape>", on_escape)                 # 焦点通常在 Text，根绑定不触发
-    text.bind("<Command-g>", toggle_ghost)
-    text.bind("<Command-G>", toggle_ghost)
 
     def _worker(code, rect):
         res = run_code(code)
@@ -356,6 +353,11 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
         if state["paused"]:
             _show(False)
         return "break"
+
+    # 焦点通常在 Text：Esc/⌘G 必须挂在 Text 上（挂在根窗口不触发）
+    text.bind("<Escape>", on_escape)
+    text.bind("<Command-g>", toggle_ghost)
+    text.bind("<Command-G>", toggle_ghost)
 
     text.bind("<Escape>", on_escape)
     root.bind("<Escape>", on_escape)
