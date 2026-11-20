@@ -381,7 +381,7 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
 
     q = queue.Queue()
     state = {"rect": None, "how": "", "busy": False, "paused": False,
-             "visible": False, "wechat_seen": False}
+             "visible": False, "mapped": False, "wechat_seen": False}
 
     def on_run(_ev=None):
         if state["busy"]:
@@ -439,8 +439,9 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
                     state["busy"] = False
                     if ok is True:
                         set_status(f"✅ {msg}（{n} 字符）", "green")
+                        text.delete("1.0", "end")     # 输入已被消费，清空供下一段
                     elif ok is False:
-                        set_status(f"❌ {msg}", "red")
+                        set_status(f"❌ {msg}", "red")   # 失败保留代码便于重试
                     else:
                         set_status(msg, "gray")
         except queue.Empty:
@@ -450,14 +451,23 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
         root.after(int(POLL_INTERVAL * 1000), _poll)
 
     def _show(v):
-        if v and not state["visible"]:
-            root.deiconify()
+        # 隐藏用"移出屏幕"而非 withdraw：floating 面板的 withdraw 在部分实现中不可靠
+        # （面板残留原位 → 注入的合成点击/粘贴落回覆盖框自己）。移出屏幕后不在光标
+        # 路径上，必然不会拦截点击；重新显示时按 rect 几何贴回。
+        if v:
+            r = state["rect"]
+            if r:
+                root.geometry(f"{max(80, int(r[2])):.0f}x{max(48, int(r[3])):.0f}"
+                              f"+{int(r[0]):.0f}+{int(r[1]):.0f}")
+            if not state["mapped"]:
+                root.deiconify()
+                state["mapped"] = True
             root.attributes("-topmost", True)
             root.lift()
-            # 不主动抢键盘焦点：用户点击覆盖框即自然聚焦（微信窗口失焦不收起，已实测）
-        elif not v and state["visible"]:
-            root.withdraw()
-        state["visible"] = v
+            state["visible"] = True
+        else:
+            root.geometry("+-2000+-2000")            # 移出屏幕（仍映射，免去 deiconify）
+            state["visible"] = False
 
     def on_escape(_ev=None):
         state["paused"] = not state["paused"]
