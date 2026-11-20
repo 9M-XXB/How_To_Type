@@ -232,11 +232,19 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
     log("辅助功能授权：" + ("已授权" if trusted else
                            "未授权（AX 定位与注入都会失败/被丢弃）" if trusted is False else "无法判定"))
 
+    TITLE_H = 28                  # 实测：aqua Tk 几何为窗口框空间，内容顶 = 几何 y + 28
     root = tk.Tk()
-    root.overrideredirect(True)                  # 无边框：贴齐真实输入框
+    # macOS 的 overrideredirect 无边框窗口无法成为 key window（点击不取得键盘焦点，
+    # 实测 --overlay-tune 即因此无法调整）——改用带精简标题栏的普通窗口；几何定位
+    # 补偿标题栏高度后，内容区仍与真实输入框精确重合。
+    root.title("pyin 原位覆盖 · Enter 换行 · Shift+Enter 运行发送")
+    try:
+        root.attributes("-toolwindow", 1)    # 收窄标题栏（属性不支持时静默跳过）
+    except tk.TclError:
+        pass
     root.attributes("-topmost", True)
     root.configure(bg="#1e1e1e")
-    root.geometry("600x120+200+600")             # 初始占位，首轮定位后覆盖
+    root.geometry("600x148+206+568")         # 初始占位（含 28pt 标题栏），首轮定位后覆盖
 
     text = tk.Text(root, bg="#1e1e1e", fg="#d6d6d6", insertbackground="#d6d6d6",
                    relief="flat", wrap="word", font=("Menlo", 13), padx=8, pady=6,
@@ -283,6 +291,9 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
 
     text.bind("<Shift-Return>", on_run)
     text.bind("<Shift-KP_Enter>", on_run)
+    text.bind("<Escape>", on_escape)                 # 焦点通常在 Text，根绑定不触发
+    text.bind("<Command-g>", toggle_ghost)
+    text.bind("<Command-G>", toggle_ghost)
 
     def _worker(code, rect):
         res = run_code(code)
@@ -307,8 +318,9 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
                     _show(True)
                 elif kind == "move":
                     x, y, w, h = payload
+                    # 几何为窗口框空间：内容区精确对齐 rect，标题栏悬在其上方 28pt
                     root.geometry(f"{max(80, int(w)):.0f}x{max(48, int(h)):.0f}"
-                                  f"+{int(x):.0f}+{int(y):.0f}")
+                                  f"+{int(x):.0f}+{int(y - TITLE_H):.0f}")
                 elif kind == "status":
                     set_status(*payload)
                 elif kind == "hotkey":
@@ -333,7 +345,7 @@ def run(dry_run=False, send_key="enter", send_engine="cgevent", probe=False):
             root.deiconify()
             root.attributes("-topmost", True)
             root.lift()
-            text.focus_set()
+            # 不主动抢键盘焦点：用户点击覆盖框即自然聚焦（微信窗口失焦不收起，已实测）
         elif not v and state["visible"]:
             root.withdraw()
         state["visible"] = v
@@ -435,15 +447,18 @@ def tune():
     win = max(wins, key=lambda t: t[1][2] * t[1][3])[1]
     import tkinter as tk
     root = tk.Tk()
-    root.overrideredirect(True)
+    # overrideredirect 无边框窗口无法取得键盘焦点（实测）——校准窗用普通窗口 + 55% 半透明，
+    # 既能取得焦点，又能透见微信真实输入框进行对齐；几何补偿标题栏高度（内容=矩形）。
+    root.title("pyin 输入区校准 — 点击本窗口后用方向键/Shift+方向键微调，回车保存")
     root.attributes("-topmost", True)
+    root.attributes("-alpha", 0.55)
     root.configure(bg="#ff9500", highlightthickness=3, highlightbackground="#ff9500")
     label = tk.Label(root, text="", bg="#ff9500", fg="#111", font=("Menlo", 11), padx=4)
 
     def apply():
         x, y, w, h = heuristic_rect(win, calib)
         root.geometry(f"{max(80, int(w)):.0f}x{max(48, int(h)):.0f}"
-                      f"+{int(x):.0f}+{int(y):.0f}")
+                      f"+{int(x):.0f}+{int(y - 28):.0f}")   # 几何为窗口框空间，内容=矩形
         label.configure(text=f"list_w={calib['list_w']:.0f}  right_m={calib['right_m']:.0f}  "
                              f"box_h={calib['box_h']:.0f}  bottom_m={calib['bottom_m']:.0f}"
                              "  |  ←→↑↓ 移动 · Shift+方向 调宽高 · r 复位 · 回车保存 · Esc 放弃")
@@ -481,8 +496,11 @@ def tune():
             ("r", reset), ("<Return>", save), ("<Escape>", quit_no_save))
     for seq, fn in keys:
         root.bind(seq, lambda e, fn=fn: (fn(e), "break")[1])
+    root.bind("<Button-1>", lambda e: root.focus_set())
+    root.focus_set()
 
-    print("[pyin] 校准开始：点击橙色外框取得键盘焦点，方向键/Shift+方向键微调至"
-          "与微信输入框完全重合，回车保存并退出（Esc 放弃）。微信窗口保持可见即可。")
+    print("[pyin] 校准开始：半透明橙色框已叠加在推算位置上——点击本窗口取得键盘焦点，"
+          "方向键/Shift+方向键微调至与微信输入框完全重合，回车保存并退出（Esc 放弃）。"
+          "微信窗口保持可见即可。")
     root.mainloop()
     return 0
