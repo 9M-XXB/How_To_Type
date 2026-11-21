@@ -1,124 +1,157 @@
-# pyin · 「更有趣（存疑）的输入方式」桌面原型（macOS / Windows / Linux · 微信 · Python）
+# pyin — 把 Python 的输出发进微信聊天
 
-> 想法出处：作者原述（2026-11-13，详见作者工作区《想法记录》文档，未随仓库分发）· 方案依据：可行性调研 §1.1 档位 A·MVP（注入先例 Espanso）· 实施记录：可行性调研 §6
-> 本文由 ZCode（编码智能体，模型 GLM-5.3-Flash）编写（2026-11-17）· English: [README.en.md](README.en.md)
+> 「更有趣（存疑）的输入方式」桌面原型：一个贴在微信输入框上的隐形代码输入框——写 Python，Shift+Enter 运行，**输出（连报错一起）直接变成聊天消息**。
+> macOS 已完整实测 · Windows / Linux 为首发版本（未经实测）· 零第三方依赖（macOS 可选 pyobjc 增强）· 仅 Python 标准库 + 系统原生 API
+> 作者：9M-XXB · 实现与调研：ZCode（GLM-5.3-Flash）· 2026-11 · English: [README.en.md](README.en.md)
 
 ## 演示视频
 
 <video src="assets/demo.mp4" controls muted playsinline width="100%"></video>
 
-*悬浮编辑器写 Python → Shift+Enter 运行 → 输出（含报错）直达微信聊天；画面中的敏感区域已按框填充梗图遮盖。若你的查看器不内联播放：[assets/demo.mp4](assets/demo.mp4)。*
+*悬浮隐形输入框写 Python → Shift+Enter 运行 → 输出（含报错）直达微信聊天。敏感区域已按框填充遮盖。浏览器不内联播放时：[assets/demo.mp4](assets/demo.mp4)。*
 
-## 这是什么
-
-把想法的**档位 A（MVP）**落到 macOS + 微信上：一个置顶悬浮代码编辑器，你在里面写 Python——
-
-| 步骤 | 行为 | 键位/机制 |
-|---|---|---|
-| 1. 呼出 | 置顶悬浮编辑器出现 | 全局热键 `⌘⌥E`（或点击窗口/Dock） |
-| 2. 写代码 | **Enter = 换行**（编辑器内正常写多行 Python） | 作者 2026-11-17 指定键位 |
-| 3. 运行 | **Shift+Enter = 运行**：子进程 `python -` 执行，捕获 stdout/stderr，超时 5s 强杀 | 显式触发，绝无"边打边跑" |
-| 4. 回注 | 运行结果（**正常输出或报错均算结果**，见想法原述）**不加任何头、原样直发**写剪贴板 → 激活微信 → `Cmd+V` 粘贴 | 激活后核实微信确为前台，否则**中止**（宁可不发也不发错）；无输出则跳过发送；注入前编辑器**必先收起**（窗口停在前台时注入不可靠——2026-11-17 实机反馈） |
-| 5. 发送 | 模拟 `Enter` → 消息发出；编辑器收起，**发送完成 1 秒后自动重开**，可直接写下一段 | 恢复原剪贴板内容（1.5s 后） |
-
-## 运行
+## 快速开始
 
 ```bash
-./run.sh               # 默认模式 = 原位覆盖：输入框直接叠在微信真实输入框上，一次启动持续生效
-./run.sh --overlay-tune  # 输入区校准：微调橙色外框至与真实输入框完全重合，回车保存
-./run.sh --overlay-probe # 只读探测：打印微信窗口边界与输入区定位结果
-./run.sh --editor      # 悬浮编辑器模式（v0.1 的自由位置置顶编辑器）
-./run.sh --dry-run     # 不真实注入：运行+格式化照常，注入改为打印到终端（无权限也能体验全流程）
-./run.sh --selftest    # 离线自测（无需 GUI/授权/微信）
-./run.sh --doctor      # 只读体检：授权/后端/微信/前台逐项检查，不注入任何按键——发不出去先跑它
-./run.sh --send-key cmd_enter    # 换发送键：enter（默认）/ cmd_enter / ctrl_enter
-./run.sh --send-engine osascript  # 换发送键的注入引擎（CGEvent / osascript 两条合成路径）
-./run.sh --probe-send  # 发送探针：向测试聊天注入 4 条带标记探针，定位哪种方式能触发发送（真实注入）
-python3 pyin.py        # 无 .venv 时的降级模式（无热键；注入走 osascript，功能等价）
+git clone https://github.com/9M-XXB/How_To_Type.git
+cd How_To_Type
+
+# macOS（推荐 venv 安装 pyobjc，提供全局热键与 CGEvent 注入）
+python3 -m venv .venv && .venv/bin/pip install pyobjc-framework-Quartz
+./run.sh
+
+# Windows（零第三方依赖）
+python pyin.py
+
+# Linux（需 X11/XWayland + xdotool + xclip）
+./run.sh
 ```
 
-默认模式的说明见下节「原位覆盖模式」。
+三个步骤即可使用：
 
-- 解释器 = 启动 pyin 的那个 Python；能 import 哪些第三方库取决于它（原型自身只用标准库 + macOS 自带 `pbcopy`/`pbpaste`/`osascript`）。
-- `.venv/` 已被 [.gitignore](.gitignore) 忽略；重建：`python3 -m venv .venv && .venv/bin/pip install pyobjc-framework-Quartz`。
+1. **授权**（macOS 必需，Windows 不需要）：系统设置 → 隐私与安全性 → 辅助功能 → 给运行 pyin 的终端 App 开开关（详见[授权说明](#授权与安全)）。
+2. **校准**（一次即可）：微信停在某聊天 → `./run.sh --overlay-tune` → 点击橙色外框 → 方向键对齐 → 回车保存。
+3. **使用**：`./run.sh` → 覆盖框自动贴合微信输入框 → 点击打字 → **Shift+Enter** 运行并发送。
 
-## 原位覆盖模式（默认模式 · 调研档位 B）
+## 三种模式
 
-直接 `./run.sh` 即进入本模式；`--editor` 切回悬浮编辑器。校准工作流：
-
-```bash
-./run.sh --overlay-tune    # 方向键/Shift+方向键微调橙色外框，回车保存 overlay_calib.json
-```
-
-无边框输入框与微信真实输入框**同位同尺寸**重叠（默认深色仿真样式，`⌘G` 切换 45% 幽灵形态）。微信在前台时自动显示、切走自动隐藏、窗口移动自动跟随——"一直开启"的原位替换输入体验。键位与悬浮编辑器一致：Enter 换行，Shift+Enter 运行并发送；发送前覆盖框自动让位，并对真实输入框中心补一次合成点击（保证粘贴与回车落在真正的第一响应者上）。
-
-定位三级降级（自动，启动与运行日志均记录）：**T1** 无障碍 AX 焦点元素（微信为自绘 UI，是否暴露焦点文本框以实机探测为准）→ **T2** 窗口边界 + 点偏移模型（常量 `list_w/right_m/box_h/bottom_m`，单位为点；由录屏逐帧测量推算，`--overlay-tune` 校准后保存 overlay_calib.json 持久生效）。Esc 或 ⌘⌥E 暂停覆盖（微信切走再切回自动恢复）。
-
-已知边界：微信 4.x 失焦时会自动收起窗口——实测（2026-11-20）**窗口其实不会收起**，仅前台轮询需要区分"微信前台/本应用前台/无关应用前台"三种情形；T2 推算矩形若与实际输入框有偏差，用 `--overlay-tune` 校准一次即可（overlay_calib.json 持久生效，不入库，按平台分节保存）。另：覆盖框为**无边框浮动面板形态**（macOS 经 `::tk::unsupported::MacWindowStyle` floating 类 + objc swizzle 重写 canBecomeKey；Windows/Linux 的无边框窗口原生可聚焦）——覆盖框必须能取得键盘焦点，而 overrideredirect 无边框窗口无法成为 key window（实测：点击有 Button-1 事件但永远无 FocusIn）；若仍出现无法输入请反馈并把 pyin.log 发来。覆盖框的隐藏采用**移出屏幕**方式（floating 面板的 withdraw 不可靠，面板残留原位会把注入的点击/粘贴吞回自己）；发送成功后覆盖框内容自动清空，失败则保留代码便于重试。
-
-## 首次使用必读：辅助功能授权
-
-把运行结果"打进"微信靠的是**系统级按键模拟**（CGEventPost 或 osascript keystroke，两者同源），必须授权：
-
-1. 系统设置 → 隐私与安全性 → **辅助功能**
-2. 把**运行 pyin 的宿主 App**（iTerm/Terminal/VSCode 等——即谁在终端里跑 `run.sh`，就加谁）打开开关
-3. 重启 pyin。启动横幅会显示授权探测结果；未授权时：热键创建失败自动禁用、真实注入会失败——先用 `--dry-run` 体验
-4. **两个易踩的坑**（2026-11-17 实测）：
-   - **授权按宿主 App 归因**：从 iTerm 启动就授权 iTerm，从 VSCode 启动就授权 VSCode——换启动方式要重新授权。拿不准就跑 `./run.sh --doctor`，它直接告诉你当前这次启动能不能注入；
-   - **macOS 把"监听"与"注入"拆成两项独立授权**（本机实测）：`CGEventTapCreate`（ListenOnly，热键监听）走"输入监控"域，即使辅助功能未授权也可能创建成功——**热键能呼出不代表注入可用**，以 `--doctor` 的"辅助功能授权"一行为准；
-   - **合成按键要挂显式 HID 事件源**（2026-11-17 探针实测）：无源 `CGEventCreateKeyboardEvent(None, …)` 的 Return 会被 WeChat 忽略（而粘贴的 Cmd+V 能到达）——挂 `kCGEventSourceStateHIDSystemState` 后即可正常触发发送；osascript 合成路径（`--send-engine osascript`）作为实测备用；
-   - 注入链每一步都落 [pyin.log](pyin.log)（已 gitignore），状态栏报错时先看它。
-
-## 工作原理与文件
-
-单文件 [pyin.py](pyin.py)（四层，≈710 行）+ [run.sh](run.sh) 启动脚本：
-
-| 层 | 函数/类 | 职责 |
+| 模式 | 命令 | 说明 |
 |---|---|---|
-| 执行层 | `run_code()` / `format_result()` | 子进程执行（`-u` 无缓冲；超时杀整个进程组后二次排空管道，保留已产生的输出）；结果**不加任何头原样直发**（成功→stdout、报错→traceback 原样、超时→已捕获输出），超 2000 字符中间截断 |
-| 注入层 | `Injector` | 写剪贴板 → AppleScript 激活微信（仅已在运行时，避免顺手拉起）→ 核实前台 → `Cmd+V` → `Enter` → 恢复剪贴板 |
-| GUI 层 | `Editor` | tkinter 置顶悬浮窗；Enter 换行（Text 默认）、Shift+Enter 运行、Esc 收起；所有 UI 更新经队列回主线程 |
-| 热键层 | `start_hotkey()` | CGEventTap（ListenOnly，不吞键）监听 `⌘⌥E`；创建失败（未授权/无 pyobjc）只禁用热键 |
+| **原位覆盖**（默认） | `./run.sh` | 无边框输入框直接叠在微信真实输入框上，随微信前台自动显隐并跟随移动，一次启动持续生效 |
+| 悬浮编辑器 | `./run.sh --editor` | 自由位置的置顶编辑器（v0.1 形态） |
+| 输入区校准 | `./run.sh --overlay-tune` | 半透明橙色框微调对齐真实输入框，回车保存（按平台独立记忆） |
 
-可调常量（pyin.py 顶部）：`RUN_TIMEOUT=5.0`（运行超时秒）、`FOCUS_DELAY=0.5` / `PASTE_DELAY=0.5`（激活/粘贴→回车时延，与探针实测一致）、`CLIPBOARD_RESTORE_DELAY=1.5`（剪贴板恢复）、`MAX_RESULT_CHARS=2000`（发送上限）、`HOTKEY_KEYCODE=14`（热键 = E 键）、`WECHAT_BUNDLE_IDS`。
+工具命令（均可独立运行）：
 
-## 验证记录（2026-11-17，ZCode 实测）
+| 命令 | 用途 |
+|---|---|
+| `--overlay-probe` | 只读探测：打印微信窗口边界与输入区定位结果 |
+| `--doctor` | 只读体检：授权 / 后端 / 微信 / 前台逐项检查——发不出去先跑它 |
+| `--selftest` | 离线自测（无需 GUI / 授权 / 微信） |
+| `--dry-run` | 不真实注入：运行 + 格式化照常，注入改为打印到终端 |
+| `--probe-send` | 发送探针：向测试聊天注入 4 条带标记探针，定位哪种方式能发送（真实注入） |
+| `--send-key <k>` | 换发送键：enter（默认）/ cmd_enter / ctrl_enter |
+| `--send-engine <e>` | 换发送键注入引擎：cgevent（默认）/ osascript（仅 macOS） |
+| `--log-keys` | 诊断日志记录每一次按键（默认只记非可打印键） |
 
-- ✔ `--selftest` 13 项全过：正常输出直发/报错 traceback 原样/超时已捕获输出直发/无输出跳过/stderr 续接/超长截断/注释-only 判定/中文 emoji 透传——venv（含 pyobjc）与降级（无 pyobjc）两套解释器各跑一遍
-- ✔ dry-run 注入链：成功与报错两种格式化输出按预期打印
-- ✔ GUI 冒烟：窗口 6s 存活无异常；未授权探测（ctypes 调 `AXIsProcessTrusted`）、热键降级路径、后端横幅均正确
-- ✔ **送达验证（2026-11-17，作者实测 `--probe-send`）**：探针 **A**（CGEvent Return + 显式 HID 源）与 **B**（osascript key code 36）均成功发送进微信聊天；**C**（⌘+Return）与 **D**（只粘贴基线）留在输入框。结论：①辅助功能授权后注入链全通；②**无源合成 Return 会被 WeChat 忽略（粘贴的 Cmd+V 却能到达）——显式 HID 事件源是默认路径能发送的关键修复**；③⌘+Enter 不是 WeChat 的发送组合键。默认配置（`enter` + `cgevent`）即探针验证的组合：写代码 → Shift+Enter → 运行 → 输出送达微信并自动发送，链路打通。
+## 工作流程（30 秒理解）
 
-## 已知限制（多为设计假设，均已在代码/本文标注）
+```
+微信前台 ──► 覆盖框自动贴合输入框 ──► 你写 Python（Enter=换行）
+   └── Shift+Enter ──► 覆盖框让位 ──► 子进程运行（5s 超时保护）
+        ──► 输出原样进剪贴板 ──► 激活微信 + 点击真实输入框
+        ──► Ctrl/Cmd+V ──► Enter 发送 ──► 恢复你的剪贴板
+        ──► 1s 内覆盖框清空内容回到原位，继续写下一段
+```
 
-1. **不检测焦点**（档位 A 的定义）：发送目标 = "激活微信后获得焦点的输入框"。请先把微信停在目标聊天。
-2. **追加而非清空**：微信输入框里已有文字时，结果会**追加**到光标处（原型不读取、不清空原框——微信输入框为自绘控件，读取不可依赖，见调研笔记 §3.4）。
-3. **发送键假设**：默认按 Enter 发送。**若输出进了输入框但变成换行没发出去**（2026-11-17 第五/六轮实机反馈）：合成事件使用**私有事件源**（`kCGEventSourceStatePrivate`）并无条件显式设置 flags——因为 `CGEventCreateKeyboardEvent` 会继承事件源当时的修饰键状态（Apple 文档行为），编辑器路径刚按完 Shift+Enter 的修饰键残留可能让 Return 被微信按惯例解释为换行（Shift+Enter 正是微信的换行快捷键）；探针路径双手离键所以始终干净。粘贴→回车时延与探针一致（0.5s）。仍异常时跑 `--probe-send` 定位。
-4. **无跨次变量保留**：每次运行是独立子进程（防卡死/防误操作，安全性优先）。
-5. **报错也发送**（想法原述明确要求）：报错内容可能含路径等敏感信息；调研笔记 §3.6 的"撤回窗口"尚未实现——建议先小范围实测。
-6. **剪贴板覆盖窗口**：发送后 1.5s 内你复制的内容会被恢复动作覆盖。
-7. **IME 组字期间 Shift+Enter** 行为未验证（中文注释输入后建议先按 Esc 退出组字态）。
-8. **微信版本未逐一验证**：本原型只用"激活 + 系统按键"，不依赖微信内部 API，理论上各版本通用；实测结果欢迎补充进本文件。
-9. **无输出不发送**：代码没产生任何输出时（含超时且无输出），跳过注入与回车——空消息发不出去，且回车会把输入框里可能残留的草稿误发出去。
+| 行为 | 规则 |
+|---|---|
+| 输出形态 | **不加任何头，原样直发**——正常输出与报错 traceback 都发 |
+| 无输出 | 不发送（不粘贴也不回车），状态栏提示 |
+| 超时 | 5 秒强制终止，已产生的输出照发 |
+| 长输出 | 超过 2000 字符中间截断 |
+| 失败 | 覆盖框保留代码便于重试；错误详情见 `pyin.log` |
 
-## 出处与依据（AGENTS.md 引用规范）
+## 授权与安全
 
-- **方案**：可行性调研（作者工作区文档《调研笔记》，未随仓库分发）§1.1 档位 A（悬浮编辑器 + 显式触发 + 剪贴板注入 + 回车发送）与 §4 MVP 路线（本原型 = W1+W2 的 macOS 版）；注入先例 Espanso（espanso.org）。
-- **Apple API**（非工作区来源，官方文档）：CGEventTap / CGEventPost 键位常量（kVK_ANSI_V=9、kVK_Return=36、kVK_ANSI_E=14）；`AXIsProcessTrusted` 经 ctypes 直调 ApplicationServices 框架。
+| 平台 | 授权要求 | 说明 |
+|---|---|---|
+| macOS | 辅助功能（必需） | 按**宿主 App** 归因：从 iTerm 启动就授权 iTerm，从 VSCode 启动就授权 VSCode；换终端要重新授权 |
+| Windows | 无 | SendInput 注入无需授权 |
+| Linux | 无 | X11/XWayland；Wayland 原生会话暂不支持 |
 
-## 跨平台（Windows / Linux）
+两个容易踩的坑（macOS 实测）：
 
-平台相关实现集中在 `native.py`（窗口枚举/前台判定/激活/点击/粘贴和弦/回车/剪贴板/热键），pyin 与 overlay 按其分派：
+- **"监听"与"注入"是两项独立授权**：热键能呼出不代表注入可用，以 `--doctor` 的"辅助功能授权"一行为准。
+- **授权按宿主 App 归因**：拿不准就跑 `./run.sh --doctor`，它直接告诉你当前这次启动能不能注入。
 
-| 平台 | 注入与剪贴板 | 定位 | 全局热键 | 授权 |
+## 诊断与排查
+
+所有运行记录持久化在 **`pyin.log`**（已 gitignore）：Tk 回调异常、线程 traceback、覆盖框的点击/焦点事件、注入链每一步。**遇到问题先看它，再把相关行发给作者。**
+
+| 症状 | 首选排查 | 工具 |
+|---|---|---|
+| 覆盖框没出现 / 位置不对 | 微信是否前台；定位矩形是否对齐 | `--overlay-probe` → `--overlay-tune` |
+| 点击覆盖框无法打字 | 日志有无 `<FocusIn>` | `pyin.log`（可加 `--log-keys`） |
+| 输出进了微信但没发送 | 微信「按 Enter 发送消息」设置；或换发送键 | `--send-key cmd_enter` |
+| 输出被粘贴进覆盖框 | 竞态（已修复）；仍有则看日志注入时刻事件 | `pyin.log` |
+| 什么都没发生、状态栏无变化 | 进程是否存活 | `--doctor` / `--selftest` |
+
+## 工作原理
+
+四个平台无关的层次 + 一个平台层（`native.py`）：
+
+| 层 | 职责 |
+|---|---|
+| 执行层 | 子进程 `python -` 运行（`-u` 无缓冲；超时杀进程组后仍保留已产生输出）；结果不加头原样直发，超 2000 字符截断 |
+| 注入层 | 剪贴板写入（回读校验）→ 激活微信并核实前台 → 粘贴和弦 → 回车 → 恢复剪贴板；未授权即显式失败 |
+| 覆盖框 | 无边框置顶输入窗：Enter 换行、Shift+Enter 运行发送、Esc 暂停、⌘G 幽灵形态（macOS 45% 透明） |
+| 定位层 | T1 AX 焦点元素（仅 macOS）→ T2 窗口边界 + 点偏移模型（`list_w/right_m/box_h/bottom_m`）→ 校准文件持久化 |
+
+可调常量（各文件顶部）：运行超时、注入时延、剪贴板恢复时延、发送上限、热键键码、发送键、定位偏移模型。
+
+## 跨平台支持
+
+| 平台 | 注入与剪贴板 | 窗口定位 | 全局热键 | 授权 |
 |---|---|---|---|---|
-| **macOS** | CGEventPost + 私有 HID 源（swizzle canBecomeKey）+ pbcopy/pbpaste | T1 AX 焦点元素 + T2 点偏移模型 | CGEventTap ⌘⌥E | 辅助功能 |
-| **Windows** | SendInput（Ctrl+V / Return）+ CF_UNICODETEXT 剪贴板（纯 ctypes，零第三方依赖） | EnumWindows（标题 微信/WeChat 或类名 WeChatMainWndForPC/Weixin）+ T2 校准 | RegisterHotKey Ctrl+Alt+E | 无需授权 |
-| **Linux** | xdotool（key ctrl+v / Return、mousemove/click）+ xclip 剪贴板 | xdotool search（class wechat/weixin）+ T2 校准 | 暂不支持 | 无需授权（需 X11/XWayland） |
+| **macOS** | CGEventPost + 私有 HID 源 + pbcopy/pbpaste | AX 焦点元素（T1）+ 窗口启发式（T2） | CGEventTap ⌘⌥E | 辅助功能 |
+| **Windows** | SendInput + CF_UNICODETEXT 剪贴板（纯 ctypes） | EnumWindows（标题/类名匹配）+ T2 校准 | RegisterHotKey Ctrl+Alt+E | 无需 |
+| **Linux** | xdotool + xclip | xdotool search + T2 校准 | 暂不支持 | 无需（X11/XWayland） |
 
-- 每个平台的输入区校准独立保存（overlay_calib.json 按平台分节）。
-- Windows 的 `cmd_enter` 发送键等同 `ctrl_enter`（Windows 无 ⌘）。
-- Linux 需要 X11/XWayland 会话与 `xdotool`、`xclip`（缺失时启动日志会提示安装命令）；Wayland 原生会话暂不支持。
-- **诚实声明**：Windows/Linux 分支按官方 API 文档编写、**尚未在对应平台实测**；在对应平台遇到问题时请以 pyin.log 反馈。
-- **微信行为假设**（工作区内无核验依据，未逐版本验证）："按 Enter 发送消息"默认开启、粘贴可进入输入框、激活后焦点回到输入框。
-- **键位与首批范围**（作者 2026-11-17 指定）：Python 语言、微信目标、Enter=换行 / Shift+Enter=运行并发送、平台 macOS、**结果不加任何头原样直发**。
+- 平台实现集中在 [`native.py`](native.py)，pyin 与 overlay 按 `native.PLATFORM` 分派；macOS 路径保留在原文件。
+- 输入区校准按平台分节保存（`overlay_calib.json`，已 gitignore）。
+- Windows 的 `cmd_enter` 等同 `ctrl_enter`；Linux 需要 X11/XWayland 会话。
+- **诚实声明**：Windows / Linux 分支按官方 API 编写、**尚未在对应平台实测**；遇到问题请带 `pyin.log` 反馈。
+
+## 已知限制
+
+**输入与发送**
+
+1. 不检测焦点：发送目标 = 覆盖框所贴的输入框（档位 A→B 的定义），请先把微信停在目标聊天。
+2. 微信输入框里的已有文字不会被读取或清空，输出追加到光标处。
+3. 发送键默认 Enter，依赖微信「按 Enter 发送消息」设置；可 `--send-key` 换。
+4. **报错也发送**（想法原述明确要求）：traceback 可能含敏感路径；"撤回窗口"尚未实现。
+5. 无输出不发送（空消息发不出，且回车可能误发草稿）。
+6. 每次运行是独立子进程：无跨次变量保留。
+
+**隐私与剪贴板**
+
+7. 发送后 1.5s 内你复制的内容会被恢复动作覆盖。
+8. 报错与输出可能含敏感信息，建议先在测试聊天验证。
+
+**环境**
+
+9. IME 组字期间的 Shift+Enter 行为未验证。
+10. 微信版本未逐一验证（只用"激活 + 系统按键"，不依赖微信内部 API）。
+11. Windows / Linux 分支未经对应平台实测（首发版本）。
+
+## 验证记录
+
+macOS 宿主已完成 9 轮迭代与验证（探针实测送达、竞态修复、隐形化等），完整过程见上游《调研笔记》§6.3；本仓库内可用 `--selftest`（12 项）、`--doctor`、`--dry-run` 随时自检。
+
+## 出处与依据
+
+- **想法与方案**：作者原述（2026-11-13）；可行性调研档位 A/B（作者工作区文档，未随仓库分发）；注入先例 [Espanso](https://espanso.org)。
+- **平台 API**（官方文档，非工作区来源）：macOS CGEventTap / CGEventPost / AX / `AXIsProcessTrusted`；Windows SendInput / RegisterHotKey / 剪贴板 API；Linux XTEST（经 xdotool）。
+- **微信行为假设**（未逐版本验证）："按 Enter 发送消息"默认开启、粘贴可进入输入框、激活后焦点回到输入框。
+- **键位与范围**（作者 2026-11-17 指定）：Python 语言、微信目标、Enter=换行 / Shift+Enter=运行并发送、结果不加任何头原样直发。

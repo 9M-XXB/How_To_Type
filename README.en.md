@@ -1,124 +1,157 @@
-# pyin · Desktop Prototype of the "A More Interesting (Perhaps) Input Method" Idea (macOS · WeChat · Python)
+# pyin — Send your Python output straight into a WeChat chat
 
-> Idea source: author's original statement (2026-11-13, documented in the author's workspace — not shipped in this repo) · Design basis: feasibility study §1.1 Tier A / MVP (injection precedent: Espanso) · Implementation log: feasibility study §6
-> Written by ZCode (coding agent, model GLM-5.3-Flash), 2026-11-17 · 中文: [README.md](README.md)
+> The "A More Interesting (Perhaps) Input Method" desktop prototype: an invisible code input box that sits on top of WeChat's real input box — write Python, press Shift+Enter, and the **output (errors included) becomes the chat message**.
+> Fully tested on macOS · Windows / Linux are first releases (untested) · Zero third-party dependencies (optional pyobjc on macOS) · Python standard library + native system APIs only
+> Author: 9M-XXB · Implementation & research: ZCode (GLM-5.3-Flash) · 2026-11 · 中文: [README.md](README.md)
 
 ## Demo video
 
 <video src="assets/demo.mp4" controls muted playsinline width="100%"></video>
 
-*Write Python in the floating editor → Shift+Enter to run → the output (errors included) lands in WeChat; sensitive regions are covered with a meme, per box. If your viewer doesn't play inline: [assets/demo.mp4](assets/demo.mp4).*
+*Write Python in the invisible overlay → Shift+Enter to run → output (errors included) lands in the WeChat chat. Sensitive regions are covered with a meme, per box. If your viewer doesn't play inline: [assets/demo.mp4](assets/demo.mp4).*
 
-## What is this
-
-The idea's **Tier A (MVP)** realized on macOS + WeChat: an always-on-top floating code editor. You write Python in it —
-
-| Step | Behavior | Key / mechanism |
-|---|---|---|
-| 1. Summon | Floating always-on-top editor appears | Global hotkey `⌘⌥E` (or click the window / Dock) |
-| 2. Write code | **Enter = newline** (write multi-line Python as usual) | Keybinding specified by the author, 2026-11-17 |
-| 3. Run | **Shift+Enter = run**: child process `python -`, stdout/stderr captured, killed after 5s timeout | Explicit trigger — never "execute while typing" |
-| 4. Inject | The run result (**normal output or an error — both count**, per the original idea) is sent **as-is with no header** → clipboard → activate WeChat → `Cmd+V` paste | Verifies WeChat is actually frontmost after activation, **aborts otherwise**; skipped entirely when there is no output; the editor **always hides before injecting** (injection is unreliable while the editor sits in front — observed 2026-11-17) |
-| 5. Send | Simulated `Enter` → message sent; the editor re-opens automatically **1 second after the send completes**, ready for the next snippet | Original clipboard restored (after 1.5s) |
-
-## Running
+## Quick start
 
 ```bash
-./run.sh               # Default mode = in-place overlay: the input box sits directly on WeChat's real input box, persistent
-./run.sh --overlay-tune  # Calibration: nudge the orange frame until it exactly matches the real input box, then save
-./run.sh --overlay-probe # Read-only probe: prints WeChat window bounds and input-area location
-./run.sh --editor      # Floating editor mode (the v0.1 free-position always-on-top editor)
-./run.sh --dry-run     # No real injection: run+format as usual, injection prints to the terminal instead
-./run.sh --selftest    # Offline self-test (no GUI / permission / WeChat needed)
-./run.sh --doctor      # Read-only check: permission/backend/WeChat/frontmost — run this when nothing gets sent
-./run.sh --send-key cmd_enter    # Change the send key: enter (default) / cmd_enter / ctrl_enter
-./run.sh --send-engine osascript  # Change the injection engine for the send key (CGEvent / osascript paths)
-./run.sh --probe-send  # Send probe: injects 4 tagged probes into a test chat to find which strategy sends (real injection)
-python3 pyin.py        # Degraded mode without .venv (no hotkey; injection via osascript, functionally equivalent)
+git clone https://github.com/9M-XXB/How_To_Type.git
+cd How_To_Type
+
+# macOS (venv + pyobjc recommended, enables global hotkey and CGEvent injection)
+python3 -m venv .venv && .venv/bin/pip install pyobjc-framework-Quartz
+./run.sh
+
+# Windows (zero third-party dependencies)
+python pyin.py
+
+# Linux (needs X11/XWayland + xdotool + xclip)
+./run.sh
 ```
 
-See the next section "In-place overlay mode" for the default mode.
+Three steps to use:
 
-- The interpreter is whatever Python launches pyin; which third-party libraries you can import depends on it (the prototype itself needs only the standard library plus macOS built-ins `pbcopy`/`pbpaste`/`osascript`).
-- `.venv/` is gitignored. To rebuild: `python3 -m venv .venv && .venv/bin/pip install pyobjc-framework-Quartz`.
+1. **Permission** (macOS only; Windows needs none): System Settings → Privacy & Security → Accessibility → enable the terminal app that runs pyin (see [Permission & safety](#permission--safety)).
+2. **Calibrate** (once): park WeChat on a chat → `./run.sh --overlay-tune` → click the orange frame → arrow keys to align → Enter to save.
+3. **Use**: `./run.sh` → the overlay hugs WeChat's input box → click and type → **Shift+Enter** runs and sends.
 
-## In-place overlay mode (default · research tier B)
+## Three modes
 
-`./run.sh` enters this mode directly; use `--editor` for the floating editor. Calibration workflow:
-
-```bash
-./run.sh --overlay-tune    # nudge the orange frame with arrows/Shift+arrows, Enter saves overlay_calib.json
-```
-
-A borderless input box **same size, same place** as WeChat's real input box (dark simulated style by default, `⌘G` toggles a 45% ghost form). It shows when WeChat is frontmost, hides when it isn't, and follows the box as it moves — an always-on in-place replacement. Keys match the floating editor: Enter newline, Shift+Enter run-and-send; before sending, the overlay steps aside and a synthetic click is placed on the center of the real input box (guaranteeing first-responder status for paste and Enter).
-
-Positioning falls back automatically (logged at startup and while running): **T1** Accessibility focused element (WeChat is custom-drawn; whether it exposes a focused text box is determined empirically) → **T2** window bounds + point-offset model (constants `list_w/right_m/box_h/bottom_m`, in points; derived from frame-by-frame measurements of the recording, and persisted via overlay_calib.json once calibrated with `--overlay-tune`). Esc or ⌘⌥E pauses the overlay (it resumes automatically after WeChat leaves and returns to the front).
-
-Known edge: an unfocused WeChat window does **not** collapse — measured on 2026-11-20 — so the real input box stays visible under the overlay. The frontmost-polling distinguishes three cases (WeChat front / our own app front / unrelated app front). If the T2 rect is misaligned with the real input box, run `--overlay-tune` once; overlay_calib.json persists and is gitignored. Also: the overlay is a **borderless floating panel** — the overlay must take keyboard focus, and an overrideredirect borderless window cannot become the key window (measured: clicks produce Button-1 events but never FocusIn; even the canBecomeKey patch had no effect — that window class never joins the key race). Hence the overlay is declared a **floating class (NSPanel)** via Tk's aqua-only `::tk::unsupported::MacWindowStyle`, with an objc swizzle as backstop; if typing still fails, report it along with pyin.log.
-
-## First run: Accessibility permission (required)
-
-Typing the result "into" WeChat relies on **system-level key injection** (CGEventPost or osascript keystroke — same trust requirement):
-
-1. System Settings → Privacy & Security → **Accessibility**
-2. Enable the switch for the **host app that runs pyin** (iTerm/Terminal/VSCode… — whichever app runs `run.sh` in a terminal)
-3. Restart pyin. The startup banner reports the detected trust state; without trust, the hotkey self-disables and real injection fails — use `--dry-run` meanwhile.
-4. **Two traps** (verified 2026-11-17):
-   - **Trust is attributed per host app**: launching from iTerm requires trusting iTerm; from VSCode, VSCode — change the launcher and you must re-grant. Run `./run.sh --doctor` to see whether the current launch can inject at all;
-   - **macOS splits "listening" and "injecting" into two independent grants** (verified on this machine): `CGEventTapCreate` (ListenOnly, the hotkey listener) lives in the "Input Monitoring" domain and may succeed even without Accessibility — **a working hotkey does not mean injection works**; trust the "Accessibility" line of `--doctor`;
-   - **Synthetic keys need an explicit HID event source** (probe-verified 2026-11-17): a source-less `CGEventCreateKeyboardEvent(None, …)` Return is ignored by WeChat (while the pasted Cmd+V arrives) — with `kCGEventSourceStateHIDSystemState` the send triggers normally; the osascript synthesis path (`--send-engine osascript`) is a verified fallback;
-   - Every injection step lands in [pyin.log](pyin.log) (gitignored) — check it whenever the status bar shows an error.
-
-## How it works & files
-
-Single file [pyin.py](pyin.py) (four layers, ≈710 lines) plus the [run.sh](run.sh) launcher:
-
-| Layer | Functions / class | Responsibility |
+| Mode | Command | Description |
 |---|---|---|
-| Execution | `run_code()` / `format_result()` | Child-process execution (`-u` unbuffered; on timeout the whole process group is killed and the pipes are drained a second time, preserving output already produced); the result is sent **as-is with no header** (success→stdout, error→raw traceback, timeout→captured output), middle-truncated past 2000 chars |
-| Injection | `Injector` | Clipboard write → AppleScript activates WeChat (only if already running, so it never cold-launches) → frontmost check → `Cmd+V` → `Enter` → clipboard restore |
-| GUI | `Editor` | tkinter always-on-top window; Enter newline (Text default), Shift+Enter run, Esc hide; all UI updates routed to the main thread via a queue |
-| Hotkey | `start_hotkey()` | CGEventTap (ListenOnly, keys pass through) listening for `⌘⌥E`; on creation failure (no trust / no pyobjc) only the hotkey is disabled |
+| **In-place overlay** (default) | `./run.sh` | A borderless input box sits exactly on WeChat's real input box; shows with WeChat, hides otherwise, follows as it moves — persistent |
+| Floating editor | `./run.sh --editor` | A free-position always-on-top editor (the v0.1 form) |
+| Input-area calibration | `./run.sh --overlay-tune` | Align a translucent orange frame to the real input box, Enter to save (remembered per platform) |
 
-Tunable constants (top of pyin.py): `RUN_TIMEOUT=5.0`, `FOCUS_DELAY=0.5` / `PASTE_DELAY=0.5` (activation / paste→Enter delays, matching the probe), `CLIPBOARD_RESTORE_DELAY=1.5`, `MAX_RESULT_CHARS=2000`, `HOTKEY_KEYCODE=14` (hotkey = the E key), `WECHAT_BUNDLE_IDS`.
+Standalone tools:
 
-## Verification log (2026-11-17, tested by ZCode)
+| Command | Purpose |
+|---|---|
+| `--overlay-probe` | Read-only probe: prints WeChat window bounds and input-area location |
+| `--doctor` | Read-only check: permission / backend / WeChat / frontmost — run this when nothing gets sent |
+| `--selftest` | Offline self-test (no GUI / permission / WeChat needed) |
+| `--dry-run` | No real injection: run + format as usual, injection prints to the terminal |
+| `--probe-send` | Send probe: injects 4 tagged probes into a test chat to find a working send strategy (real injection) |
+| `--send-key <k>` | Change the send key: enter (default) / cmd_enter / ctrl_enter |
+| `--send-engine <e>` | Change the send-key injection engine: cgevent (default) / osascript (macOS only) |
+| `--log-keys` | Log every keystroke to the diagnostics (default: non-printable keys only) |
 
-- ✔ `--selftest` 13/13: normal output sent as-is / error sent as raw traceback / timeout sends already-captured output / no output skips sending / stderr continuation / long-output truncation / comment-only guard / CJK + emoji passthrough — run on both the venv interpreter (with pyobjc) and the degraded one (without)
-- ✔ dry-run injection chain: success and error formatted outputs print as expected
-- ✔ GUI smoke test: window alive 6s with no exceptions; untrusted-permission detection (ctypes call to `AXIsProcessTrusted`), hotkey degradation path, and backend banner all correct
-- ✔ **Delivery verified (2026-11-17, author ran `--probe-send`)**: probe **A** (CGEvent Return + explicit HID source) and **B** (osascript key code 36) both sent successfully into the WeChat chat; **C** (⌘+Return) and **D** (paste-only baseline) stayed in the input box. Conclusions: ① with Accessibility granted, the whole injection chain works; ② **a source-less synthetic Return is ignored by WeChat (while the pasted Cmd+V arrives) — the explicit HID event source is the key fix for the default path**; ③ ⌘+Enter is not a WeChat send shortcut. The default configuration (`enter` + `cgevent`) is the probe-verified combo: write code → Shift+Enter → run → output delivered to WeChat and auto-sent. End to end works.
+## How it works (30-second version)
 
-## Known limitations (mostly design assumptions, annotated in code and here)
+```
+WeChat front ──► overlay hugs the input box ──► you write Python (Enter = newline)
+   └── Shift+Enter ──► overlay steps aside ──► child-process run (5s timeout guard)
+        ──► output, verbatim, to clipboard ──► activate WeChat + click the real input box
+        ──► Ctrl/Cmd+V ──► Enter sends ──► your clipboard is restored
+        ──► within 1s the overlay returns, cleared, ready for the next snippet
+```
 
-1. **No focus detection** (by Tier A definition): the send target is "whatever input box in WeChat has focus after activation". Leave WeChat on the intended chat first.
-2. **Appends, never clears**: existing text in the WeChat input box stays; the result is pasted at the cursor (the prototype never reads or clears the box — WeChat's input is a custom-drawn widget, reading it is unreliable; see research notes §3.4).
-3. **Send-key assumption**: the default is Enter-to-send. **If the output lands in the input box as a newline instead of sending** (observed in the 2026-11-17 test rounds): synthetic events use a **private event source** (`kCGEventSourceStatePrivate`) with flags always set explicitly — `CGEventCreateKeyboardEvent` inherits the event source's current modifier state (documented Apple behavior), so modifier residue from the Shift+Enter you just typed could make WeChat interpret the Return as a newline (Shift+Enter is WeChat's newline shortcut); the probe path always worked because your hands were off the keyboard. The paste→Enter delay matches the probe (0.5s). If anything is still off, run `--probe-send`.
-4. **No state across runs**: every run is a fresh child process (hanging code can't freeze the editor; side effects stay contained).
-5. **Errors are sent too** (explicitly required by the original idea): tracebacks may contain paths or other sensitive strings; the "recall window" from research notes §3.6 is not implemented — test in a small chat first.
-6. **Clipboard clobber window**: anything you copy within 1.5s after sending gets overwritten by the restore step.
-7. **IME composition**: Shift+Enter behavior while an IME composition is active is unverified (finish/commit the composition first).
-8. **WeChat versions unverified**: the prototype only uses "activate + system keys", no WeChat-internal APIs, so it should work across versions; please feed real-world results back into this file.
-9. **No output, no send**: when the code produces no output at all (including a silent timeout), injection and Enter are skipped — an empty message cannot be sent, and pressing Enter could mis-fire leftover draft text.
+| Behavior | Rule |
+|---|---|
+| Output form | **No header, verbatim** — normal output and error tracebacks are both sent |
+| No output | Nothing is sent (no paste, no Enter); the status bar tells you |
+| Timeout | Killed after 5 s; output produced so far is still sent |
+| Long output | Middle-truncated past 2000 characters |
+| Failure | The overlay keeps your code for retry; details in `pyin.log` |
 
-## Sources & basis (per AGENTS.md citation rules)
+## Permission & safety
 
-- **Design**: feasibility study (author's workspace doc "调研笔记", not shipped in this repo) §1.1 Tier A (floating editor + explicit trigger + clipboard injection + Enter-to-send) and §4 MVP plan (this prototype = the macOS implementation of W1+W2); injection precedent Espanso (espanso.org).
-- **Apple APIs** (non-workspace sources, official docs): CGEventTap / CGEventPost and keycodes (kVK_ANSI_V=9, kVK_Return=36, kVK_ANSI_E=14); `AXIsProcessTrusted` called via ctypes against the ApplicationServices framework.
+| Platform | Requirement | Notes |
+|---|---|---|
+| macOS | Accessibility (required) | Trust is attributed per **host app**: launching from iTerm requires trusting iTerm; change the launcher and re-grant |
+| Windows | none | SendInput needs no permission |
+| Linux | none | X11/XWayland; native Wayland sessions not supported yet |
 
-## Cross-platform (Windows / Linux)
+Two traps (measured on macOS):
 
-Platform-specific implementations live in `native.py` (window enumeration / frontmost detection / activation / click / paste chord / Enter / clipboard / hotkey); pyin and overlay dispatch through it:
+- **"Listening" and "injecting" are two independent grants**: a working hotkey does not mean injection works — trust the "Accessibility" line of `--doctor`.
+- **Trust is attributed per host app**: not sure? Run `./run.sh --doctor`; it tells you whether the current launch can inject.
 
-| Platform | Injection & clipboard | Positioning | Global hotkey | Permission |
+## Diagnostics & troubleshooting
+
+Everything is persisted in **`pyin.log`** (gitignored): Tk callback exceptions, thread tracebacks, overlay click/focus events, every injection step. **Check it first, then send the relevant lines with your report.**
+
+| Symptom | First check | Tool |
+|---|---|---|
+| Overlay missing / misaligned | Is WeChat frontmost; does the rect match | `--overlay-probe` → `--overlay-tune` |
+| Clicking the overlay doesn't let you type | Look for `<FocusIn>` in the log | `pyin.log` (add `--log-keys`) |
+| Output reached WeChat but wasn't sent | WeChat's "press Enter to send" setting; or change the send key | `--send-key cmd_enter` |
+| Output was pasted into the overlay | Return-early race (fixed); if it recurs, check injection-time events | `pyin.log` |
+| Nothing happens at all | Is the process alive | `--doctor` / `--selftest` |
+
+## How it works
+
+Four platform-agnostic layers + one platform layer (`native.py`):
+
+| Layer | Responsibility |
+|---|---|
+| Execution | Child-process `python -` (`-u` unbuffered; on timeout the process group is killed and produced output is kept); result sent verbatim with no header, middle-truncated past 2000 chars |
+| Injection | Clipboard write (round-trip verified) → activate WeChat + verify frontmost → paste chord → Enter → clipboard restore; explicit failure when unauthorized |
+| Overlay | Borderless always-on-top input window: Enter newline, Shift+Enter run-and-send, Esc pause, ⌘G ghost form (45% alpha on macOS) |
+| Positioning | T1 AX focused element (macOS only) → T2 window bounds + point-offset model (`list_w/right_m/box_h/bottom_m`) → calibration file |
+
+Tunable constants (top of each file): run timeout, injection delays, clipboard-restore delay, send length cap, hotkey keycode, send key, positioning offsets.
+
+## Cross-platform
+
+| Platform | Injection & clipboard | Window positioning | Global hotkey | Permission |
 |---|---|---|---|---|
-| **macOS** | CGEventPost + private HID source (swizzled canBecomeKey) + pbcopy/pbpaste | T1 AX focused element + T2 point-offset model | CGEventTap ⌘⌥E | Accessibility |
-| **Windows** | SendInput (Ctrl+V / Return) + CF_UNICODETEXT clipboard (pure ctypes, zero third-party deps) | EnumWindows (title 微信/WeChat or class WeChatMainWndForPC/Weixin) + T2 calibration | RegisterHotKey Ctrl+Alt+E | none needed |
-| **Linux** | xdotool (key ctrl+v / Return, mousemove/click) + xclip clipboard | xdotool search (class wechat/weixin) + T2 calibration | not yet | none needed (X11/XWayland) |
+| **macOS** | CGEventPost + private HID source + pbcopy/pbpaste | AX focused element (T1) + window heuristic (T2) | CGEventTap ⌘⌥E | Accessibility |
+| **Windows** | SendInput + CF_UNICODETEXT clipboard (pure ctypes) | EnumWindows (title/class match) + T2 calibration | RegisterHotKey Ctrl+Alt+E | none |
+| **Linux** | xdotool + xclip | xdotool search + T2 calibration | not yet | none (X11/XWayland) |
 
-- Input-area calibration is saved per platform (overlay_calib.json is sectioned by platform).
-- `cmd_enter` equals `ctrl_enter` on Windows (no ⌘ key there).
-- Linux needs an X11/XWayland session plus `xdotool` and `xclip` (startup logs tell you the install command); native Wayland sessions are not supported yet.
-- **Honest note**: the Windows/Linux branches are written against the official APIs and have **not been tested on those platforms yet**; when something misbehaves there, please report with pyin.log.
-- **WeChat behavior assumptions** (no workspace verification, unverified across versions): "Enter sends the message" on by default, paste lands in the input box, activation restores input focus.
-- **Scope & keybindings** (specified by the author, 2026-11-17): Python language, WeChat as target, Enter=newline / Shift+Enter=run-and-send, platform macOS, **results sent as-is with no header**.
+- Platform implementations live in [`native.py`](native.py); pyin and overlay dispatch via `native.PLATFORM`; the macOS paths stay in their original files.
+- Calibration is saved per platform (sectioned in `overlay_calib.json`, gitignored).
+- `cmd_enter` maps to `ctrl_enter` on Windows (no ⌘ there); Linux needs X11/XWayland.
+- **Honest note**: the Windows / Linux branches follow the official APIs and have **not been tested on those platforms**; please report issues with `pyin.log`.
+
+## Known limitations
+
+**Input & sending**
+
+1. No focus detection: the send target is whatever input box the overlay covers — park WeChat on the intended chat first.
+2. WeChat's existing input text is never read or cleared; output is appended at the cursor.
+3. The send key defaults to Enter and depends on WeChat's "press Enter to send" setting; change with `--send-key`.
+4. **Errors are sent too** (explicitly required by the original idea): tracebacks may contain sensitive paths; a "recall window" is not implemented yet.
+5. No output, no send (an empty message can't be sent, and Enter could mis-fire a draft).
+6. Each run is a fresh child process: no state is kept across runs.
+
+**Privacy & clipboard**
+
+7. Anything you copy within 1.5 s after sending gets overwritten by the restore step.
+8. Output and tracebacks may contain sensitive information — verify in a test chat first.
+
+**Environment**
+
+9. Shift+Enter behavior during IME composition is unverified.
+10. WeChat versions are unverified one by one (the prototype only uses "activate + system keys").
+11. The Windows / Linux branches have not been tested on those platforms (first releases).
+
+## Verification log
+
+The macOS host went through 9 rounds of iteration and verification (probe-verified delivery, race fixes, invisibility work); the full history lives in the upstream research notes §6.3. Inside this repo, `--selftest` (12 checks), `--doctor` and `--dry-run` are available for self-checking at any time.
+
+## Sources & basis
+
+- **Idea & design**: author's original statement (2026-11-13); feasibility study tiers A/B (author's workspace docs, not shipped in this repo); injection precedent [Espanso](https://espanso.org).
+- **Platform APIs** (official docs, non-workspace sources): macOS CGEventTap / CGEventPost / AX / `AXIsProcessTrusted`; Windows SendInput / RegisterHotKey / clipboard API; Linux XTEST (via xdotool).
+- **WeChat behavior assumptions** (unverified across versions): "press Enter to send" on by default, paste lands in the input box, activation restores input focus.
+- **Keybindings & scope** (specified by the author, 2026-11-17): Python language, WeChat as target, Enter=newline / Shift+Enter=run-and-send, results sent verbatim with no header.
